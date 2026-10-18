@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "id": "fonsgaudii.cmdcenter",
+  "name": "Command center",
+  "version": "0.1.0",
+  "author": "fonsgaudii",
+  "description": "Browsable, searchable front-end for every omarchy CLI command",
+  "kinds": ["menu"],
+  "keepLoaded": true,
+  "entryPoints": { "menu": "Palette.qml" }
+}

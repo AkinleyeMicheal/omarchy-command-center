@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# dict-lookup.sh <word> — dictionary provider (Phase 7): definitions from
+# the free dictionaryapi.dev (no key, no account).
+#   stdout: up to three definitions joined by " · " (one line)
+# Exit: 0 definition found · 2 no entry · 4 rejected args · 1 network/parse.
+#
+# The word is validated to letters/apostrophe/space/hyphen before it touches
+# the URL, so the request path is built from a proven-safe string only.
+set -u
+
+word="$(printf '%s' "${1:-}" | tr -d '\n\r' \
+  | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+case "$word" in
+  "") echo "dict-lookup: empty word" >&2; exit 4 ;;
+esac
+# Strip the specials a word may carry (' - and spaces), then the remainder
+# must be pure letters. (A literal apostrophe inside a case bracket pattern
+# wrecks the shell's own quoting — this avoids that trap entirely.)
+core="$(printf '%s' "$word" | tr -d "' -")"
+case "$core" in
+  *[!A-Za-z]*) echo "dict-lookup: letters only" >&2; exit 4 ;;
+esac
+[ "${#word}" -le 64 ] || { echo "dict-lookup: word too long" >&2; exit 4; }
+
+enc="${word// /%20}"
+url="https://api.dictionaryapi.dev/api/v2/entries/en/$enc"
+
+json="$(curl -sf --max-time 8 -- "$url")"
+rc=$?
+if [ "$rc" -eq 22 ]; then exit 2 ; fi   # HTTP error → no entry
+[ "$rc" -eq 0 ] || exit 1               # DNS/timeout/…
+
+def="$(printf '%s' "$json" \
+  | jq -r '[.[0].meanings[]?.definitions[]?.definition][0:3] | join(" · ")' \
+      2>/dev/null)" || def=""
+# Empty or unparseable body ("don't" answers 200 with []) reads as "no
+# entry" — only transport failures above (rc≠0, ≠22) are exit 1.
+case "$def" in
+  ""|"null") exit 2 ;;
+esac
+printf '%s\n' "$def"
