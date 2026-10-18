@@ -222,6 +222,7 @@ Item {
     || detailKind === "file" || detailKind === "dict"
     || detailKind === "toggle" || detailKind === "panel" || detailKind === "power"
     || detailKind === "status" || detailKind === "history"
+    || detailKind === "run"
     || detailKind === "newsitem" || detailKind === "newsrefresh"
     || detailKind === "newsfeeds" || detailKind === "feedadd"
   // Real image for the detail pane: computed rows carry theirs in the
@@ -1681,7 +1682,10 @@ Item {
       kind: a.kind, actionId: a.id, label: a.label,
       state: st[a.id] || "", confirm: !!a.confirm,
       panel: a.panel || "", desc: a.desc || "",
-      confirmMsg: a.confirmMsg || "", body: a.body || ""
+      confirmMsg: a.confirmMsg || "", body: a.body || "",
+      // 8.6 detail card: the static command a run row executes, plus its
+      // section (learn links get an "Open" verb, tools "Run").
+      cmd: a.cmd || "", section: a.section || ""
     })
     row.group = a.id   // rowGlyph resolves the icon from the id
     return row
@@ -2049,6 +2053,14 @@ Item {
       qReboot: labels(root.controlActionRows("reboot")),
       qSleep: labels(root.controlActionRows("sleep")),
       qDnd: labels(root.controlActionRows("dnd")),
+      // 8.6 QA: what the detail pane (rightmost) binds for the selected
+      // row after open {"query": …} — kind/computed drive the card.
+      qSpeed: labels(root.controlActionRows("speed")),
+      qTheme: labels(root.controlActionRows("theme")),
+      detail: { idx: root.selectedCommand, n: displayModel.count,
+                kind: root.detailKind, computed: root.detailIsComputed,
+                label: root.detailRow ? String(root.detailRow.label || "") : "",
+                payload: root.detailPayload },
       // Footer rail (Phase 5+): tile ids ("*" = popover tiles) and the
       // power popover's gated row inventory ("?" = confirm-gated).
       footer: root.footerTiles.map(function(t) {
@@ -3945,6 +3957,7 @@ Item {
                         : root.detailKind === "power" ? "SESSION"
                         : root.detailKind === "status" ? "SYSTEM"
                         : root.detailKind === "history" ? "LAUNCH HISTORY"
+                        : root.detailKind === "run" ? "ACTION"
                         : root.detailKind === "newsitem" ? "NEWS"
                         : root.detailKind === "newsrefresh" || root.detailKind === "newsfeeds"
                           || root.detailKind === "feedadd"
@@ -4229,6 +4242,48 @@ Item {
                     onClicked: root.activateComputed()
                   }
 
+                  // ---- 8.6 control titles: panel + run cards lead with
+                  // their name and purpose so the pane is never a lone
+                  // caption + button (the "nothing on the rightmost panel"
+                  // complaint that stalled 8.6's first cut).
+                  Text {
+                    visible: root.detailKind === "run"
+                      || (root.detailKind === "panel" && !!root.detailPayload
+                          && String(root.detailPayload.label || "") !== "")
+                    Layout.fillWidth: true
+                    text: root.detailPayload ? String(root.detailPayload.label || "") : ""
+                    color: root.selectedBorder
+                    wrapMode: Text.Wrap
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.display
+                    font.weight: Font.Bold
+                  }
+                  Text {
+                    visible: (root.detailKind === "run" || root.detailKind === "panel")
+                      && !!root.detailPayload
+                      && String(root.detailPayload.desc || "") !== ""
+                    Layout.fillWidth: true
+                    text: root.detailPayload ? String(root.detailPayload.desc || "") : ""
+                    color: root.foreground
+                    opacity: 0.6
+                    wrapMode: Text.Wrap
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                  }
+                  // The exact static command a run row will execute — what
+                  // Enter fires, what Ctrl+C copies. Wrapped, dimmed, honest.
+                  Text {
+                    visible: root.detailKind === "run" && !!root.detailPayload
+                      && String(root.detailPayload.cmd || "") !== ""
+                    Layout.fillWidth: true
+                    text: root.detailPayload ? String(root.detailPayload.cmd) : ""
+                    color: root.foreground
+                    opacity: 0.5
+                    wrapMode: Text.WrapAnywhere
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+
                   // ---- Phase-5 control buttons (one row per kind, plus the
                   // history pair). Power verbs spell out the consequence.
                   Button {
@@ -4251,7 +4306,21 @@ Item {
                     visible: root.detailKind === "panel"
                       || (root.detailKind === "status" && !!root.detailPayload
                           && String(root.detailPayload.panelId || "") !== "")
-                    text: "Open settings"
+                    // The title above carries the identity now: a panel row
+                    // just opens ("Network speed test" → Open); status rows
+                    // keep the phase-5 wording.
+                    text: root.detailKind === "panel" ? "Open" : "Open settings"
+                    fontFamily: root.fontFamily
+                    foreground: root.foreground
+                    accent: root.selectedBorder
+                    onClicked: root.activateComputed()
+                  }
+
+                  Button {
+                    visible: root.detailKind === "run"
+                    text: root.detailPayload
+                      && String(root.detailPayload.section || "") === "learn"
+                      ? "Open" : "Run"
                     fontFamily: root.fontFamily
                     foreground: root.foreground
                     accent: root.selectedBorder

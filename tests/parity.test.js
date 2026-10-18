@@ -130,6 +130,14 @@ check("rank 'wiki' offers learn-arch", wiki.includes("learn-arch"), true)
 check("rank 'dnd' still top-dnd", rankIds("dnd")[0], "dnd")
 check("rank 'lock' still top-lock", rankIds("lock")[0], "lock")
 
+// ---- Enter must fire run rows directly (8.6 dead-Enter regression: run
+// was missing from isInstantKind, so Enter parked on an empty detail pane
+// and activate() bailed on a null detailCmd) -----------------------------
+check("run is an instant kind", isInstantKind("run"), true)
+check("panel still instant", isInstantKind("panel"), true)
+check("power still instant", isInstantKind("power"), true)
+check("plain commands stay non-instant", isInstantKind("cmd"), false)
+
 // ---- activation shape: run rows carry a non-empty static cmd ----------
 for (const [ourId, menuId] of Object.entries(runMap)) {
   if (!byId[ourId]) continue

@@ -206,6 +206,9 @@ function isInstantKind(kind) {
   return kind === "calc" || kind === "convert" || kind === "web"
     || kind === "agent" || kind === "toggle" || kind === "panel"
     || kind === "power" || kind === "status" || kind === "history"
+    // 8.6 fix: menu-parity run rows must fire on Enter like the other
+    // control kinds — without this Enter parked on an empty detail pane.
+    || kind === "run"
     || kind === "newsitem" || kind === "newsrefresh"
     || kind === "newsfeeds" || kind === "feedadd"
     // Phase-7 providers: focus / paste / open / copy-the-answer.
