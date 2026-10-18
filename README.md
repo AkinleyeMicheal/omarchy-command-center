@@ -112,6 +112,39 @@ pitfalls log live in [ROADMAP.md](ROADMAP.md). Mutated state stays in
   curl (`--resolve`) so a DNS rebind between check and connect cannot
   win. No telemetry.
 
+## Security model
+
+- **Copied data never rides argv.** Clipboard writes (clipboard-history
+  entries, copied commands, calc results, titles, paths, definitions)
+  go to `wl-copy` over stdin; the file/dictionary queries, the pasted
+  feed URL, and the now-playing track metadata use the same stdin
+  pattern. Process argv stays world-readable in `/proc`, so private
+  payloads never appear there. OSD messages are static text for the
+  same reason (control characters stripped, length-capped).
+- **Command execution is user intent only.** Terminal launches and
+  background runs execute the command line you can see and edit in the
+  palette — the equivalent of typing it in a terminal (its text is
+  necessarily visible in `ps` while it runs, like any command).
+  Remote data and clipboard data provably never reach an execution
+  path; `commands.json` is treated as untrusted and only
+  `omarchy <subcommand>`-shaped routes survive loading.
+- **omarchy's `shell call` dispatcher reaches any root-scope function**
+  with one caller-chosen string, so every function on this plugin that
+  can execute something or reach the network lives on an internal
+  object the dispatcher cannot see (the sanctioned external surface is
+  `open`/`close`/`toggle`/`ping`). Object-shaped action handlers
+  additionally reject non-object arguments.
+- **Image sources are local paths only, gated to `$HOME`.** QML's
+  `Image` never fetches URLs; MPRIS-supplied `file://` art, ghost
+  snapshot paths, and clipboard image paths are all prefix-checked
+  against your home directory (the art copier re-checks and refuses
+  symlinks), and `Icon=` values containing path separators are
+  rejected.
+- **State lives in one owner-only directory**
+  (`~/.local/state/omarchy-cmdcenter`, mode 700, files 600); the
+  plugin never writes to `/usr/share/omarchy` and removes cleanly with
+  `omarchy plugin remove`.
+
 ## License
 
 [MIT](LICENSE) (c) 2026 AkinleyeMicheal

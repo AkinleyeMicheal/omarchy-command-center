@@ -32,10 +32,12 @@ state="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-cmdcenter"
 feeds_file="$state/feeds.json"
 news_file="$state/news.json"
 mkdir -p "$state"
+chmod 700 "$state" 2>/dev/null || true   # holds feed URLs, news, history
 
 # Seed the starter feeds ONCE (decision: ships with optional starter
 # feeds). The file is user-owned afterwards — edit or empty it freely.
 if [[ ! -f $feeds_file ]]; then
+  old_umask=$(umask); umask 077   # the seed stays owner-only (0600)
   cat > "$feeds_file.tmp" <<'JSON'
 {
   "feeds": [
@@ -45,6 +47,7 @@ if [[ ! -f $feeds_file ]]; then
 }
 JSON
   mv "$feeds_file.tmp" "$feeds_file"
+  umask "$old_umask"
 fi
 
 if [[ "${1:-}" == "--max-age" ]]; then

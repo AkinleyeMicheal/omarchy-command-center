@@ -50,10 +50,9 @@ get_trackid() {
 case "$mode" in
   pos)
     pos="$(get_pos)"
-    case "$pos" in
-      ''|*[!0-9-]*) exit 1 ;;
-      *) printf '%s\n' "$pos"; exit 0 ;;
-    esac ;;
+    # Strict ^-?[0-9]+$ — "5-3" or "-" must not reach arithmetic.
+    case "${pos#-}" in ''|*[!0-9]*) exit 1 ;; esac
+    printf '%s\n' "$pos"; exit 0 ;;
   seek)
     target="$(printf '%s' "${3:-}" | tr -d '\n\r\0')"
     case "$target" in
@@ -63,9 +62,8 @@ case "$mode" in
     # offset out of getopt's reach. One atomic script-side computation,
     # so a stale palette value can't skew the jump.
     pos="$(get_pos)"
-    case "$pos" in
-      ''|*[!0-9-]*) exit 1 ;;
-    esac
+    # Strict ^-?[0-9]+$ — "5-3" or "-" must not reach arithmetic.
+    case "${pos#-}" in ''|*[!0-9]*) exit 1 ;; esac
     rel=$((target - pos))
     if busctl --user call "$dest" "$obj" "$iface" Seek x -- "$rel" \
       >/dev/null 2>&1; then

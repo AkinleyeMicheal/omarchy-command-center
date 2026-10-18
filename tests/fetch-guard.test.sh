@@ -217,6 +217,20 @@ expect_eq "every Palette Text renders plain" \
   "$(grep -cE '^[[:space:]]*(delegate: )?Text \{$' Palette.qml)" \
   "$(grep -c 'textFormat: Text.PlainText' Palette.qml)"
 
+# --- 8.12: copied payload rides stdin, never argv (/proc cmdline) ---------
+# The old sinks (`printf … | wl-copy` under bash -lc) put clipboard
+# history, commands, titles, results into world-readable argv.
+expect_eq "no printf-to-wl-copy sink left" "0" \
+  "$(grep -cE "printf '%s'.*wl-copy" Palette.qml)"
+expect_eq "wl-copy only as the stdin Process command" "1" \
+  "$(grep 'wl-copy' Palette.qml | grep -v '//' | wc -l | tr -d ' ')"
+expect_eq "stdin Processes present" "5" \
+  "$(grep -c 'stdinEnabled: true' Palette.qml)"
+expect_eq "copyCommandLine delegates to stdin copy" "1" \
+  "$(grep -c 'root.copyText(cmdline, "Command copied")' Palette.qml)"
+expect_eq "no copied value in OSD messages" "0" \
+  "$(grep -c '"Copied " + p.result' Palette.qml)"
+
 # --- add-feed: content-declared href gets the destination guard -----------
 if command -v python3 >/dev/null 2>&1; then
   sbwww="$sb/www"; mkdir -p "$sbwww"
@@ -249,6 +263,34 @@ XML
     expect_eq "add-feed relative href added" "Local Zine" "$out"
     expect_eq "add-feed feeds count" "1" \
       "$(jq '.feeds | length' "$sb/af2/omarchy-cmdcenter/feeds.json" 2>/dev/null || echo 0)"
+
+    # Path-relative href (no leading slash) — resolved against the pasted
+    # URL's DIRECTORY, origin untouched (the 8.13 join fix; the old sed
+    # here was unterminated and aborted the add under pipefail).
+    mkdir -p "$sbwww/sub"
+    cat > "$sbwww/sub/page.html" <<'HTML'
+<html><head><link rel="alternate" type="application/rss+xml" href="feed.xml"></head><body>page</body></html>
+HTML
+    cat > "$sbwww/sub/feed.xml" <<'XML'
+<?xml version="1.0"?><rss version="2.0"><channel><title>Sub Zine</title></channel></rss>
+XML
+    out=$(XDG_STATE_HOME="$sb/af3" bash ./add-feed.sh "http://127.0.0.1:$port/sub/page.html" 2>/dev/null)
+    expect_eq "add-feed path-relative href resolved" "Sub Zine" "$out"
+
+    # Authority injection: a content href that LOOKS like a host must
+    # stay a path on the user's host (where the server 404s → exit 4),
+    # never become a link-local fetch.
+    cat > "$sbwww/sub/inject.html" <<'HTML'
+<html><head><link rel="alternate" type="application/rss+xml" href="169.254.169.254/steal"></head><body>page</body></html>
+HTML
+    rc=$(XDG_STATE_HOME="$sb/af4" bash ./add-feed.sh \
+      "http://127.0.0.1:$port/sub/inject.html" >/dev/null 2>&1; echo $?)
+    expect_eq "add-feed relative href cannot take the authority" "4" "$rc"
+
+    # stdin delivery: the pasted URL rides a pipe, never argv.
+    out=$(printf '%s\n' "http://127.0.0.1:$port/sub/page.html" \
+      | XDG_STATE_HOME="$sb/af5" bash ./add-feed.sh 2>/dev/null)
+    expect_eq "add-feed accepts url on stdin" "Sub Zine" "$out"
   else
     echo "SKIP: add-feed discovery cases (server did not start)"
   fi
@@ -321,6 +363,66 @@ if getent ahosts example.com >/dev/null 2>&1 \
 else
   echo "SKIP: live fetch case (no network)"
 fi
+
+# --- 8.13: audit hardening wiring ------------------------------------------
+# Payload/stdin class: clipboard, queries, URLs and track metadata never
+# ride argv; copied values never ride OSD argv.
+expect_eq "add-feed url rides stdin" "1" "$(grep -c 'IFS= read -r url' add-feed.sh)"
+expect_eq "add-feed proc has no url argv" "2" \
+  "$(grep -c '\["bash", root.addFeedScript\]' Palette.qml)"
+expect_eq "file-search proc has no query argv" "2" \
+  "$(grep -c '\["bash", root.fileSearchScript\]' Palette.qml)"
+expect_eq "dict proc has no word argv" "2" \
+  "$(grep -c '\["bash", root.dictScript\]' Palette.qml)"
+expect_eq "file-search reads stdin" "1" "$(grep -c 'IFS= read -r q' file-search.sh)"
+expect_eq "dict reads stdin" "1" "$(grep -c 'IFS= read -r word' dict-lookup.sh)"
+expect_eq "media save rides NUL stdin" "1" "$(grep -c 'saveMediaFields.join' Palette.qml)"
+expect_eq "media-memory reads NUL fields" "1" \
+  "$(grep -c "read -r -d ''" media-memory.sh)"
+expect_eq "no feed name in OSD" "0" "$(grep -c '"Added " + (name' Palette.qml)"
+expect_eq "no command output in OSD" "0" \
+  "$(grep -c '✖", root.lastRunInfo' Palette.qml)"
+# add-feed relative-href join: authority always from the user's URL.
+expect_eq "add-feed builds origin from user url" "1" \
+  "$(grep -c 'base_origin=' add-feed.sh)"
+expect_eq "old broken relative-join sed stays gone" "0" \
+  "$(grep -cF "sed -E 's#^(.*/)[^/]*\$#\1/')" add-feed.sh)"
+# Dispatcher hardening: exec/network sinks live on the `priv` child object,
+# unreachable from omarchy's loader.item[method] shell-call dispatcher.
+expect_eq "priv surface present" "1" "$(grep -c 'id: priv' Palette.qml)"
+expect_eq "no exec sink on root scope" "0" \
+  "$(grep -cE '^  function (activate|activateComputed|activateRecent|runBackground|openTerminal|addFeed|fetchHelp|launchApp|launchAppRecord)\(' Palette.qml)"
+expect_eq "shape guards on object exec sinks" "7" \
+  "$(grep -c 'typeof .* !== "object"' Palette.qml)"
+# Cache-poisoning / quoting / scheme hardening.
+expect_eq "catalog route filter present" "2" "$(grep -c 'safeRoute' CommandsModel.js)"
+expect_eq "quoteArg covers glob/tilde/comment" "1" "$(grep -c '{}~#' CommandsModel.js)"
+expect_eq "web template scheme-checked in QML" "1" \
+  "$(grep -c 'wUrl.indexOf("https://") === 0' Palette.qml)"
+expect_eq "mprIS file art gated to HOME" "1" \
+  "$(grep -c 'path.indexOf(home + "/") === 0' Palette.qml)"
+expect_eq "ghost image paths gated to HOME" "1" \
+  "$(grep -c 'snap.artFile = ""' Palette.qml)"
+expect_eq "clip detail icon gated to HOME" "1" \
+  "$(grep -c 'cp.indexOf(String(Quickshell.env("HOME"))' Palette.qml)"
+# Script-side hardening from the audit.
+expect_eq "fetch-guard port parsed decimal" "1" \
+  "$(grep -c '10#\$NETGUARD_PORT' fetch-guard.sh)"
+expect_eq "file-search awk via ENVIRON" "1" "$(grep -c 'ENVIRON\["Q"\]' file-search.sh)"
+expect_eq "dict curl has size cap" "1" "$(grep -c 'max-filesize' dict-lookup.sh)"
+expect_eq "metrics sets -u" "1" "$(grep -c '^set -u' metrics.sh)"
+expect_eq "mpris pos strict int" "2" "$(grep -c 'case "\${pos#-}"' mpris-ctl.sh)"
+expect_eq "detect-env override scheme-checked" "1" \
+  "$(grep -c 'https://\*%s\*' detect-env.sh)"
+expect_eq "player-icon rejects Icon paths" "1" \
+  "$(grep -c 'case "$icon" in \*/\*' player-icon.sh)"
+expect_eq "build-catalog guards omarchy path" "1" \
+  "$(grep -c 'omarchy not on PATH' build-catalog.sh)"
+for s in fetch-feeds add-feed build-catalog update-usage toggle-pin fetch-art \
+         media-memory player-icon; do
+  expect_eq "state dir hardened in $s.sh" "1" \
+    "$(grep -c 'chmod 700' "$s.sh")"
+done
 
 echo "$passed passed, $failed failed"
 [ "$failed" = 0 ]

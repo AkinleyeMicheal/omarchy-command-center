@@ -25,7 +25,7 @@ function windowMatches(wins, query, limit) {
   if (q.length < 2) return []
   var max = Number(limit) > 0 ? Number(limit) : 4
   var out = []
-  var seen = ({})
+  var seen = Object.create(null)   // data-keyed; "__proto__"-safe
   var list = Array.isArray(wins) ? wins : []
   for (var i = 0; i < list.length && out.length < max; i++) {
     var w = list[i]

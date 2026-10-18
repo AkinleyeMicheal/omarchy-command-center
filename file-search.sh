@@ -12,7 +12,11 @@
 # full walk is cheap; awk's early exit at 40 matches SIGPIPEs fd.
 set -u
 
-q="$(printf '%s' "${1:-}" | tr -d '\n\r\0')"
+# Delivery: argv, or one line on stdin — the palette writes the query
+# there so it (potentially pasted text) never sits in world-readable
+# /proc cmdline during the seconds-long home walk.
+if [ -n "${1:-}" ]; then q="$1"; else IFS= read -r q || true; fi
+q="$(printf '%s' "$q" | tr -d '\n\r\0')"
 [ -n "$q" ] || { echo "file-search: empty query" >&2; exit 4; }
 [ "${#q}" -le 128 ] || { echo "file-search: query too long" >&2; exit 4; }
 
@@ -27,7 +31,10 @@ fd --hidden --type f --absolute-path \
    --exclude 'target' \
    --exclude '.steam' \
    . 2>/dev/null \
-  | awk -v q="$(printf '%s' "$q" | tr '[:upper:]' '[:lower:]')" '
+  | Q="$(printf '%s' "$q" | tr '[:upper:]' '[:lower:]')" awk '
+      # ENVIRON, not -v: awk -v backslash-expands its input, and the
+      # query is data.
+      BEGIN { q = ENVIRON["Q"] }
       {
         n = split($0, parts, "/")
         if (index(tolower(parts[n]), q) > 0) {

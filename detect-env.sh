@@ -35,13 +35,22 @@ if [[ -f $override ]]; then
   line=$(grep -v '^[[:space:]]*#' "$override" | grep -v '^[[:space:]]*$' | head -1)
   if [[ $line == *%s* ]]; then
     if [[ $line == *"|"* ]]; then
-      echo "WEB_NAME=${line%%|*}"
-      echo "WEB_URL=${line#*|}"
+      web_name="${line%%|*}"
+      web_url="${line#*|}"
     else
-      echo "WEB_NAME=Custom"
-      echo "WEB_URL=$line"
+      web_name="Custom"
+      web_url="$line"
     fi
-    exit 0
+    # The template prefixes every palette web search — web scheme only.
+    # The override file is user-owned, but this branch also guards the
+    # principle for anything that ever writes it.
+    case "$web_url" in
+      http://*%s* | https://*%s*)
+        echo "WEB_NAME=$web_name"
+        echo "WEB_URL=$web_url"
+        exit 0
+        ;;
+    esac
   fi
 fi
 

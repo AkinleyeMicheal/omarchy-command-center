@@ -217,7 +217,9 @@ function isWebUrl(u) {
 }
 
 function dedupeRecentEntries(entries) {
-  var seen = ({})
+  // null-prototype map: data-keyed (routes/ids may be anything) — a
+  // literal "__proto__" key must not read Object.prototype.
+  var seen = Object.create(null)
   var out = []
   for (var i = 0; i < entries.length; i++) {
     var e = entries[i]

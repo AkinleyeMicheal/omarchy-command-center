@@ -27,20 +27,55 @@ cmd="${1:-}"
 
 case "$cmd" in
   save)
-    [ "$#" -eq 9 ] || exit 2
-    title="$2"
-    artist="$3"
-    app_id="$4"
-    identity="$5"
-    art_src="$6"
-    logo="$7"
-    len_us="${8:-0}"
-    pos_us="${9:-0}"
+    if [ "$#" -eq 1 ]; then
+      # stdin mode (the palette): eight NUL-separated fields, EOF after
+      # the last. D-Bus strings can never contain NUL, so the framing is
+      # lossless — and titles/artists/identity never touch world-readable
+      # argv (8.13 review: MPRIS metadata is app-supplied AND private
+      # listening history).
+      fields=()
+      for _ in 1 2 3 4 5 6 7 8; do
+        IFS= read -r -d '' f || f=""
+        fields+=("$f")
+      done
+      title="${fields[0]}"
+      artist="${fields[1]}"
+      app_id="${fields[2]}"
+      identity="${fields[3]}"
+      art_src="${fields[4]}"
+      logo="${fields[5]}"
+      len_us="${fields[6]}"
+      pos_us="${fields[7]}"
+    elif [ "$#" -eq 9 ]; then
+      title="$2"
+      artist="$3"
+      app_id="$4"
+      identity="$5"
+      art_src="$6"
+      logo="$7"
+      len_us="${8:-0}"
+      pos_us="${9:-0}"
+    else
+      exit 2
+    fi
+    # A save without a title is a usage error in both modes (an EOF'd
+    # stdin must not produce a phantom empty snapshot).
+    [ -n "$title" ] || exit 2
     # Only plain non-negative integers may reach --argjson.
     case $len_us in '' | *[!0-9]*) len_us=0 ;; esac
     case $pos_us in '' | *[!0-9]*) pos_us=0 ;; esac
 
     mkdir -p "$state_dir/media" || exit 1
+    chmod 700 "$state_dir" "$state_dir/media" 2>/dev/null || true
+
+    # ART_SRC is MPRIS-supplied — any session-bus app controls it. Only
+    # a plain existing file INSIDE $HOME, never a symlink, may be copied
+    # into persistent state: no /etc, /proc, ~/.ssh probing by pointing
+    # trackArtUrl at it (8.13 review).
+    case "$art_src" in
+      "$HOME"/*) [ -f "$art_src" ] && [ ! -L "$art_src" ] || art_src="-" ;;
+      *) art_src="-" ;;
+    esac
 
     ghost_art="$state_dir/media/ghost-art.img"
     art_file=""

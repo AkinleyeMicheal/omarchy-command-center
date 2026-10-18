@@ -8,7 +8,10 @@
 # the URL, so the request path is built from a proven-safe string only.
 set -u
 
-word="$(printf '%s' "${1:-}" | tr -d '\n\r' \
+# Delivery: argv, or one line on stdin (the palette writes it there so
+# the word — potentially pasted text — never sits in /proc cmdline).
+if [ -n "${1:-}" ]; then word="$1"; else IFS= read -r word || true; fi
+word="$(printf '%s' "$word" | tr -d '\n\r' \
   | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
 case "$word" in
   "") echo "dict-lookup: empty word" >&2; exit 4 ;;
@@ -25,7 +28,7 @@ esac
 enc="${word// /%20}"
 url="https://api.dictionaryapi.dev/api/v2/entries/en/$enc"
 
-json="$(curl -sf --max-time 8 -- "$url")"
+json="$(curl -sf --max-time 8 --max-filesize 2097152 --proto '=https' -- "$url")"
 rc=$?
 if [ "$rc" -eq 22 ]; then exit 2 ; fi   # HTTP error → no entry
 [ "$rc" -eq 0 ] || exit 1               # DNS/timeout/…

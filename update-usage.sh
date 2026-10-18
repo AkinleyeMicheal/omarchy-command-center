@@ -31,9 +31,14 @@ fi
 route="${1:?update-usage: missing route}"
 
 mkdir -p "$dir"
+chmod 700 "$dir" 2>/dev/null || true   # holds launch history
 exec 9>"$file.lock"
 flock 9
-[[ -s $file ]] || echo '{}' > "$file"
+if [[ ! -s $file ]]; then
+  old_umask=$(umask); umask 077
+  echo '{}' > "$file"
+  umask "$old_umask"
+fi
 
 tmp=$(mktemp "$dir/.usage.XXXXXX")
 if [[ $mode == "forget" ]]; then

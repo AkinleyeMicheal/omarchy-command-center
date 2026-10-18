@@ -26,6 +26,10 @@ expect_eq() { # name got want
 sandbox=$(mktemp -d)
 trap 'rm -rf "$sandbox"' EXIT
 export XDG_STATE_HOME="$sandbox/state"
+# The art-src policy is "$HOME only, never a symlink" (MPRIS metadata is
+# app-supplied) — model the real contract by making the sandbox HOME.
+export HOME="$sandbox/home"
+mkdir -p "$HOME"
 mem=./media-memory.sh
 json="$XDG_STATE_HOME/omarchy-cmdcenter/last-media.json"
 
@@ -56,13 +60,32 @@ expect_eq "posUs passthrough" \
 expect_eq "snapshot is valid json" \
   "$(printf '%s' "$loaded" | jq -e . >/dev/null 2>&1; echo $?)" "0"
 
+# --- stdin protocol (8.13: MPRIS metadata never rides argv) --------------
+printf 'Stream Title\x00Stream Artist\x00mpv\x00mpv\x00-\x00-\x000\x000\x00' \
+  | bash "$mem" save >/dev/null 2>&1
+expect_eq "stdin save exit" 0 "$?"
+expect_eq "stdin save title" "$(bash "$mem" load | jq -r '.title')" "Stream Title"
+expect_eq "stdin save artist" "$(bash "$mem" load | jq -r '.artist')" "Stream Artist"
+# EOF with no fields is a usage error, not a phantom snapshot.
+printf '' | bash "$mem" save >/dev/null 2>&1
+expect_eq "stdin save empty rejected" 2 "$?"
+
 # --- art copy lifecycle ----------------------------------------------------
-printf 'PNGFAKE' >"$sandbox/art.img"
-bash "$mem" save "With Art" "B" "mpv" "mpv" "$sandbox/art.img" "-" 10 5 >/dev/null 2>&1
+printf 'PNGFAKE' >"$HOME/art.img"
+bash "$mem" save "With Art" "B" "mpv" "mpv" "$HOME/art.img" "-" 10 5 >/dev/null 2>&1
 ghost_art="$XDG_STATE_HOME/omarchy-cmdcenter/media/ghost-art.img"
 expect_eq "art copied" "$(cat "$ghost_art" 2>/dev/null)" "PNGFAKE"
 expect_eq "artFile points at copy" \
   "$(bash "$mem" load | jq -r '.artFile')" "$ghost_art"
+
+# MPRIS-supplied art outside $HOME, or through a symlink, never reaches
+# persistent state (any session-bus app controls trackArtUrl).
+printf 'EVIL' >"$sandbox/evil.img"
+bash "$mem" save "Evil" "B" "mpv" "mpv" "$sandbox/evil.img" "-" 10 5 >/dev/null 2>&1
+expect_eq "art outside HOME refused" "$(cat "$ghost_art")" "PNGFAKE"
+ln -sf "$HOME/art.img" "$HOME/link.img"
+bash "$mem" save "Link" "B" "mpv" "mpv" "$HOME/link.img" "-" 10 5 >/dev/null 2>&1
+expect_eq "symlinked art refused" "$(cat "$ghost_art")" "PNGFAKE"
 
 # A "-" keeps the previous copy (art of a new track not fetched yet).
 bash "$mem" save "Next Track" "B" "mpv" "mpv" "-" "-" 10 5 >/dev/null 2>&1

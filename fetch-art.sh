@@ -33,6 +33,7 @@ if [ -f "$STATE/media/art.url" ] && [ -f "$STATE/media/art.img" ] \
 fi
 
 mkdir -p "$STATE/media"
+chmod 700 "$STATE" "$STATE/media" 2>/dev/null || true
 tmp="$(mktemp "$STATE/media/.art-XXXXXX")"
 if ! netguard_fetch "$url" "$tmp" 4194304 \
     "Mozilla/5.0 (X11; Linux x86_64) quickshell-art-fetch"; then
@@ -49,5 +50,7 @@ case "$mime" in
 esac
 
 mv -f "$tmp" "$STATE/media/art.img"
+old_umask=$(umask); umask 077           # cache marker stays owner-only
 printf '%s\n' "$url" > "$STATE/media/art.url"   # cache marker last
+umask "$old_umask"
 exit 0

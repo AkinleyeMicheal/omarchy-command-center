@@ -177,6 +177,9 @@ netguard_url_parts() {
   fi
   [[ -n $NETGUARD_HOST ]] || { NETGUARD_REASON="empty host"; return 1; }
   if [[ -n $NETGUARD_PORT ]]; then
+    # Decimal, not octal: (( 0080 )) parses base-8 and errors out with
+    # a stray stderr line (the URL still fails closed, but confusingly).
+    NETGUARD_PORT=$((10#$NETGUARD_PORT))
     (( NETGUARD_PORT >= 1 && NETGUARD_PORT <= 65535 )) || { NETGUARD_REASON="bad port"; return 1; }
   else
     NETGUARD_PORT=80; [[ $NETGUARD_SCHEME == https ]] && NETGUARD_PORT=443

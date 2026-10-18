@@ -19,9 +19,13 @@ state="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-cmdcenter"
 feeds_file="$state/feeds.json"
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# URL delivery: argv, or stdin (the palette writes it there so the
+# pasted URL — possibly a signed/tokenized link — never sits in
+# world-readable /proc cmdline during the multi-second probe).
 url="${1:-}"
+if [[ -z $url && ! -t 0 ]]; then IFS= read -r url || true; fi
 if [[ -z $url ]]; then
-  echo "usage: add-feed.sh <url>" >&2
+  echo "usage: add-feed.sh <url>   (argv, or one line on stdin)" >&2
   exit 2
 fi
 # Tolerate a copy-pasted URL with stray trailing whitespace.
@@ -38,7 +42,12 @@ esac
 # shellcheck source=fetch-guard.sh
 . "$here/fetch-guard.sh"
 mkdir -p "$state"
-[[ -f $feeds_file ]] || printf '{"feeds":[]}' > "$feeds_file"
+chmod 700 "$state" 2>/dev/null || true     # state dir holds private data
+if [[ ! -f $feeds_file ]]; then             # seed stays owner-only (0600)
+  old_umask=$(umask); umask 077
+  printf '{"feeds":[]}' > "$feeds_file"
+  umask "$old_umask"
+fi
 
 tmps=()
 cleanup() { rm -f "${tmps[@]:-}"; }
@@ -73,7 +82,20 @@ if ! head -c 512 "$probe" | grep -qiE '<\?xml|<rss|<feed[ >]'; then
       feed_url="$(printf '%s' "$url" | sed -E 's#^([a-zA-Z][a-zA-Z0-9+.-]*://[^/]+).*#\1#')$href"
       ;;
     *)
-      feed_url="$(printf '%s' "$url" | sed -E 's#^(.*/)[^/]*$#\1/')$href"
+      # Path-relative declared href: resolve against the pasted URL's
+      # DIRECTORY — the origin always comes from the user's own URL, and
+      # a URL without a path resolves under "/". Content must never
+      # influence the authority (the 8.13 review point: a bare
+      # `https://host` base plus href="169.254.169.254/x" previously
+      # built a link-local URL, and the sed that was meant to prevent it
+      # was unterminated — silently aborting the whole add under
+      # pipefail).
+      base_origin=$(printf '%s' "$url" \
+        | sed -nE 's#^([a-zA-Z][a-zA-Z0-9+.-]*://[^/?#]+).*$#\1#p')
+      base_dir=$(printf '%s' "$url" \
+        | sed -nE 's#^[a-zA-Z][a-zA-Z0-9+.-]*://[^/?#]+([^?#]*).*$#\1#p')
+      base_dir="${base_dir%/*}"
+      feed_url="$base_origin$base_dir/$href"
       ;;
   esac
   # A relative declared href stays on the host the USER chose → seed

@@ -9,6 +9,7 @@
 #     2-packet ping overlapping that window, so a run lands under ~1.5s
 #     (QML ticks every 2s and skips while one is in flight).
 # One bounded run per tick, no state, argv-only like every script here.
+set -u
 
 # Device resolved exactly like status.sh (connected physical link;
 # loopback/tun/VPN skipped).

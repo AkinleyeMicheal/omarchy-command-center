@@ -33,7 +33,18 @@ function normalizeCommand(c) {
 function parseCatalog(commands) {
   var out = []
   var list = commands || []
-  for (var i = 0; i < list.length; i++) out.push(normalizeCommand(list[i]))
+  // The cache file is loaded from the state dir, so it is treated as
+  // UNTRUSTED input: a poisoned commands.json must not be able to name
+  // an arbitrary binary (routes reach `bash -lc` when run, and the
+  // selected row's `--help` probe fires on browse). Every genuine
+  // catalog route is `omarchy <subcommand>` over a safe charset — the
+  // shipped catalog passes 367/367 — so anything else is dropped.
+  var safeRoute = /^omarchy [A-Za-z0-9 ._:,@+-]*$/
+  for (var i = 0; i < list.length; i++) {
+    var c = normalizeCommand(list[i])
+    if (!safeRoute.test(String(c.route || ""))) continue
+    out.push(c)
+  }
   out.sort(function(a, b) {
     if (a.group !== b.group) return a.group < b.group ? -1 : 1
     return a.bare < b.bare ? -1 : (a.bare > b.bare ? 1 : 0)
@@ -42,7 +53,7 @@ function parseCatalog(commands) {
 }
 
 function buildGroupList(catalog, descriptions) {
-  var seen = ({})
+  var seen = Object.create(null)   // data-keyed; "__proto__"-safe
   for (var i = 0; i < catalog.length; i++) {
     var g = catalog[i].group
     if (!seen[g]) seen[g] = { name: g, label: g, description: (descriptions || {})[g] || "", count: 0 }
@@ -142,7 +153,11 @@ function tokenChipText(tok) {
 function quoteArg(v) {
   var s = String(v === undefined || v === null ? "" : v)
   if (!s) return s
-  return /[\s"'\\$`|&;<>()]/.test(s) ? "'" + s.replace(/'/g, "'\\''") + "'" : s
+  // The class covers command separators/substitution AND the
+  // expansion/comment chars — `*`, `~`, `#` and friends must not reach
+  // bash -lc unquoted either (glob, tilde and comment expansion).
+  return /[\s"'\\$`|&;<>()*?[\]{}~#]/.test(s)
+    ? "'" + s.replace(/'/g, "'\\''") + "'" : s
 }
 
 function assembleCommandLine(cmd, values) {

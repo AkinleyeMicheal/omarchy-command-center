@@ -49,8 +49,13 @@ if [ -z "$match" ]; then
 fi
 [ -n "$match" ] || exit 1
 
-icon="$(sed -n 's/^Icon=//p' "$match" | head -1)"
+icon="$(sed -n 's/^Icon=//p' "$match" | head -1 | tr -d '\n\r\0' | cut -c1-128)"
 [ -n "$icon" ] || exit 1
+# Icon= is .desktop CONTENT — local but untrusted: a slash or ".."
+# would walk the path joins below to arbitrary files (Icon=../../.ssh/
+# id_rsa even matches id_rsa.* via the pixmaps glob). The desktop spec
+# allows absolute paths here; we decline them (degrade to the glyph).
+case "$icon" in */*|*..*) exit 1 ;; esac
 
 best=""
 shopt -s nullglob
@@ -71,6 +76,7 @@ shopt -u nullglob
 [ -n "$best" ] || exit 1
 
 mkdir -p "$STATE/media"
+chmod 700 "$STATE" "$STATE/media" 2>/dev/null || true
 tmp="$(mktemp "$STATE/media/.logo-XXXXXX")"
 printf '%s\n' "$best" > "$tmp" && mv -f "$tmp" "$cache"
 printf '%s\n' "$best"

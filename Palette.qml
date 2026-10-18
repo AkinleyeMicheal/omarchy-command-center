@@ -231,8 +231,12 @@ Item {
     var p = root.detailPayload
     if (!p) return ""
     if (p.kind === "window") return String(p.icon || "")
-    if (p.kind === "clip" && String(p.type || "") === "image")
-      return String(p.path || "")
+    if (p.kind === "clip" && String(p.type || "") === "image") {
+      // clipboard-history.json is externally writable — a clip image path
+      // becomes an Image source, so it must sit inside $HOME.
+      var cp = String(p.path || "")
+      return cp.indexOf(String(Quickshell.env("HOME")) + "/") === 0 ? cp : ""
+    }
     return ""
   }
   readonly property string activeGroupLabel: {
@@ -463,8 +467,10 @@ Item {
 
   function addFeedRow(url) {
     var u = String(url).trim()
+    var failed = root.addFeedError && root.addFeedErrorUrl === u
     var row = root.computedRow("feedadd", "Add as feed",
-      u + " · discovers the feed, validates, refreshes",
+      failed ? "Failed: " + root.addFeedError
+             : u + " · discovers the feed, validates, refreshes",
       { kind: "feedadd", label: u, url: u })
     row.group = Controls.NEWS_GLYPHS.add
     return row
@@ -506,36 +512,51 @@ Item {
   // Inline feed add (argv-only URL). Script exits: 0 ok (name on
   // stdout) · 3 already added · anything else a stderr reason. On
   // success we land in the News group — selectGroup clears the filter.
+  // The pasted URL rides stdin, never argv: it can carry query-string
+  // tokens and would sit in world-readable /proc cmdline during the
+  // multi-second probe otherwise.
+  property string pendingFeedUrl: ""
+  property string addFeedError: ""
+  property string addFeedErrorUrl: ""
+
   Process {
     id: addFeedProc
     running: false
-    command: ["bash", root.addFeedScript, ""]
+    stdinEnabled: true
+    command: ["bash", root.addFeedScript]
+    onStarted: {
+      write(root.pendingFeedUrl)
+      stdinEnabled = false       // closeWriteChannel → the script's read EOFs
+    }
     stdout: StdioCollector { id: addFeedOut; waitForEnd: true }
     stderr: StdioCollector { id: addFeedErr; waitForEnd: true }
     onExited: function(exitCode) {
       if (exitCode === 0) {
-        var name = String(addFeedOut.text || "").trim()
-        root.osd(Controls.NEWS_GLYPHS.add, "Added " + (name || "feed"))
+        // Static OSD: the feed NAME is remote-controlled (the page's
+        // <title>) and this message rides argv — the name appears in the
+        // News group the palette just switched to.
+        root.addFeedError = ""; root.addFeedErrorUrl = ""
+        root.osd(Controls.NEWS_GLYPHS.add, "Feed added")
         for (var gi = 0; gi < groupListModel.count; gi++) {
           if (groupListModel.get(gi).name === "__news") { root.selectGroup(gi); break }
         }
       } else {
-        root.osd(Controls.NEWS_GLYPHS.add,
-          String(addFeedErr.text || "Couldn't add feed").trim().slice(0, 64))
+        // The reason is remote-derived (add-feed.sh echoes the remote
+        // name/URL on stderr) — display it INSIDE the palette (plain
+        // text), keep argv static.
+        var reason = String(addFeedErr.text || "").trim().split("\n")[0]
+          .replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 120)
+        root.addFeedError = reason || "Couldn't add feed"
+        root.addFeedErrorUrl = root.pendingFeedUrl
+        root.osd(Controls.NEWS_GLYPHS.add, "Couldn't add feed — reason in palette")
+        root.rebuildDisplay(true)
       }
     }
   }
 
-  function addFeed(url) {
-    if (!url) return
-    if (addFeedProc.running) {
-      root.osd(Controls.NEWS_GLYPHS.add, "An add is already running")
-      return
-    }
-    root.osd(Controls.NEWS_GLYPHS.add, "Validating feed…")
-    addFeedProc.command = ["bash", root.addFeedScript, url]
-    addFeedProc.running = true
-  }
+  // ------------------------------------- execution moves to `priv` below
+  // (addFeed lives on the guarded execution surface; the Process above
+  // takes the URL over stdin in addFeedProc.onStarted).
 
   // ---------------------------------------------------------- home (Phase 6b)
   // Ambient cards for the default view (group *, no query): weather,
@@ -683,7 +704,17 @@ Item {
     var p = root.nowPlaying
     var url = p ? String(p.trackArtUrl || "") : ""
     if (!url) { root.mediaArt = ""; root.mediaPendingUrl = ""; return }
-    if (url.indexOf("file://") === 0) { root.mediaArt = url; return }
+    if (url.indexOf("file://") === 0) {
+      // MPRIS is app-supplied: a local art path must decode to a file
+      // INSIDE $HOME — never /etc, /proc, ~/.ssh or any system path the
+      // shell's image decoder would otherwise be pointed at. The script
+      // re-checks ($HOME only, no symlink) before anything persists.
+      var path = url.slice(7).split("?")[0]
+      try { path = decodeURIComponent(path) } catch (e) { path = "" }
+      var home = String(Quickshell.env("HOME"))
+      root.mediaArt = path.indexOf(home + "/") === 0 ? url : ""
+      return
+    }
     if (url.indexOf("http") !== 0) { root.mediaArt = ""; return }
     if (url === root.mediaArtUrl) return
     if (artProc.running) { root.mediaPendingUrl = url; return }
@@ -857,13 +888,25 @@ Item {
     onLoaded: {
       var snap = null
       try { snap = JSON.parse(text() || "null") || null } catch (e) { snap = null }
+      // The snapshot file is state-dir owned but its image paths still get
+      // prefix-checked before they become Image sources: only paths inside
+      // $HOME (what media-memory.sh/player-icon.sh may legitimately write)
+      // ever reach the decoder.
+      if (snap) {
+        var home = String(Quickshell.env("HOME")) + "/"
+        var a = String(snap.artFile || "")
+        var l = String(snap.logoFile || "")
+        if (a && a.indexOf(home) !== 0) snap.artFile = ""
+        if (l && l.indexOf(home) !== 0) snap.logoFile = ""
+      }
       root.ghostMedia = snap
     }
   }
 
   // Persist the current playback (or refresh the art copy once a fetch
   // lands). Silent no-op while nothing plays — the old snapshot stays.
-  // All values are argv elements; the script's jq does the encoding.
+  // Values travel as NUL-separated stdin fields, never argv.
+  property var saveMediaFields: []
   function saveMediaMemory() {
     var p = root.nowPlaying
     if (!p || saveMediaProc.running) return
@@ -873,12 +916,13 @@ Item {
     var art = ""
     if (root.mediaArt.indexOf("file://") === 0)
       art = root.mediaArt.split("?")[0].replace("file://", "")
-    saveMediaProc.command = [root.mediaMemoryScript, "save",
-      title, String(p.trackArtist || ""),
+    root.saveMediaFields = [title, String(p.trackArtist || ""),
       app ? String(app.id) : "", String(p.identity || p.desktopEntry || ""),
       art || "-", root.mediaLogo || "-",
       String(root.mediaLenUs > 0 ? Math.round(root.mediaLenUs) : 0),
       String(root.mediaPosUs >= 0 ? Math.round(root.mediaPosUs) : 0)]
+    saveMediaProc.stdinEnabled = true
+    saveMediaProc.command = [root.mediaMemoryScript, "save"]
     saveMediaProc.running = true
   }
 
@@ -903,13 +947,21 @@ Item {
     var g = root.ghostMedia
     if (!g) return
     var app = root.appById[String(g.appId || "")]
-    if (app && app.isApp) root.launchAppRecord(app)  // closes the palette
+    if (app && app.isApp) priv.launchAppRecord(app)  // closes the palette
   }
 
   Process {
     id: saveMediaProc
     running: false
+    // Track metadata rides stdin as eight NUL-separated fields — D-Bus
+    // strings can never contain NUL, so the framing is lossless, and
+    // titles/artists/identity never touch world-readable argv.
+    stdinEnabled: true
     command: ["bash", root.mediaMemoryScript, "load"]
+    onStarted: {
+      write(saveMediaFields.join("\u0000") + "\u0000")
+      stdinEnabled = false      // closeWriteChannel → the script's read EOFs
+    }
   }
 
   // Closing the palette hands off mid-track: save once more so the ghost
@@ -920,7 +972,7 @@ Item {
   Timer {
     id: helpTimer
     interval: 300
-    onTriggered: root.fetchHelp()
+    onTriggered: priv.fetchHelp()
   }
 
   Process {
@@ -976,6 +1028,14 @@ Item {
   Process {
     id: fileSearchProc
     running: false
+    // The query rides stdin, never argv — the fd walk can take seconds
+    // and pasted text must not sit in world-readable /proc cmdline.
+    stdinEnabled: true
+    command: ["bash", root.fileSearchScript]
+    onStarted: {
+      write(String(root.fileQuery || "").replace(/[\r\n]+/g, " "))
+      stdinEnabled = false      // closeWriteChannel → the script's read EOFs
+    }
     stdout: StdioCollector { id: fileSearchOut; waitForEnd: true }
     onExited: function(exitCode) {
       root.fileProcExit = exitCode
@@ -992,7 +1052,8 @@ Item {
   function runFileSearch() {
     if (fileSearchProc.running) return
     if (!root.fileQuery) return
-    fileSearchProc.command = ["bash", root.fileSearchScript, root.fileQuery]
+    fileSearchProc.stdinEnabled = true
+    fileSearchProc.command = ["bash", root.fileSearchScript]
     fileSearchProc.running = true
   }
 
@@ -1007,6 +1068,13 @@ Item {
   Process {
     id: dictProc
     running: false
+    // The word rides stdin, never argv (same rule as the file search).
+    stdinEnabled: true
+    command: ["bash", root.dictScript]
+    onStarted: {
+      write(String(root.dictWord || "").replace(/[\r\n]+/g, " "))
+      stdinEnabled = false      // closeWriteChannel → the script's read EOFs
+    }
     stdout: StdioCollector { id: dictOut; waitForEnd: true }
     onExited: function(exitCode) {
       var word = root.dictWord
@@ -1021,7 +1089,8 @@ Item {
   function runDictLookup() {
     if (dictProc.running) return
     if (!root.dictWord) return
-    dictProc.command = ["bash", root.dictScript, root.dictWord]
+    dictProc.stdinEnabled = true
+    dictProc.command = ["bash", root.dictScript]
     dictProc.running = true
   }
 
@@ -1060,36 +1129,33 @@ Item {
     groupListModel.clear()
     groupListModel.append({
       name: "*", label: "All commands", glyph:"󰒓",
-      description: "Every omarchy command", count: root.catalog.length
+      count: root.catalog.length
     })
     groupListModel.append({
       name: "__pins", label: "Pinned", glyph: "★",
-      description: "Your favorites", count: root.pins.length
+      count: root.pins.length
     })
     groupListModel.append({
       name: "__apps", label: "Apps", glyph: "󰀻",
-      description: "Installed applications", count: root.apps.length
+      count: root.apps.length
     })
     groupListModel.append({
       name: "__controls", label: "Controls", glyph: Controls.GROUP_GLYPHS.controls,
-      description: "Toggles, settings, and session actions",
       count: Controls.ACTIONS.length
     })
     groupListModel.append({
       name: "__history", label: "History", glyph: Controls.GROUP_GLYPHS.history,
-      description: "Launches over time",
       count: Controls.historyEntries(root.usage).length
     })
     groupListModel.append({
       name: "__news", label: "News", glyph: Controls.NEWS_GLYPHS.news,
-      description: "Feeds you follow",
       count: root.newsItems.length
     })
     for (var i = 0; i < groups.length; i++) {
       groupListModel.append({
         name: groups[i].name, label: groups[i].label,
         glyph: CmdModel.groupGlyph(groups[i].name),
-        description: groups[i].description, count: groups[i].count
+        count: groups[i].count
       })
     }
 
@@ -1475,7 +1541,11 @@ Item {
     root.availableAgents = agents
     root.defaultAgent = def
     if (wName) root.webEngineName = wName
-    if (wUrl.indexOf("%s") >= 0) root.webTemplate = wUrl
+    // Web scheme only: this template prefixes every palette web search
+    // (detect-env.sh enforces the same at the source).
+    if (wUrl.indexOf("%s") >= 0
+        && (wUrl.indexOf("http://") === 0 || wUrl.indexOf("https://") === 0))
+      root.webTemplate = wUrl
   }
   Component.onCompleted: {
     envProbeProc.running = true
@@ -1934,16 +2004,7 @@ Item {
   // Click a recent tile: apps launch straight away; commands jump to the
   // All-commands list with the row selected in the detail pane (they may
   // take arguments, so a bare click shouldn't execute them).
-  function activateRecent(index) {
-    var row = recentModel.get(index)
-    if (!row) return
-    if (row.kind === "app") {
-      var app = root.appById[String(row.route).slice(4)]
-      if (app) root.launchAppRecord(app)
-      return
-    }
-    root.selectRoute(row.route)
-  }
+  // (activateRecent — the recents-tile launcher — lives on `priv`.)
 
   // Bring any command route into view: switch to All commands, rebuild,
   // then select and scroll to its row.
@@ -2204,18 +2265,7 @@ Item {
     helpTimer.restart()
   }
 
-  function fetchHelp() {
-    var cmd = root.detailCmd
-    if (!cmd || cmd.isApp) { root.helpLoading = false; return }
-    if (helpProc.running) return   // in-flight; onExited re-arms the timer
-    // Routes come from the trusted catalog (dispatcher metadata, safe
-    // charset) — sanitized anyway before they touch a shell string.
-    var safe = String(cmd.route).replace(/[^A-Za-z0-9 _-]/g, "")
-    if (!safe) { root.helpLoading = false; return }
-    root.helpRoute = cmd.route
-    helpProc.command = ["bash", "-lc", "exec " + safe + " --help"]
-    helpProc.running = true
-  }
+  // (fetchHelp — the --help exec — lives on the guarded `priv` surface.)
 
   function noteLaunch(route) {
     var next = [route]
@@ -2310,13 +2360,13 @@ Item {
       var sel = displayModel.get(root.selectedCommand)
       var k = sel ? sel.kind : ""
       if (Controls.isInstantKind(k)) {
-        root.activateComputed()
+        priv.activateComputed()
         return
       }
       root.focusPane = 2
       root.actionIndex = 0
     } else {
-      root.activate(["auto", "terminal", "copy"][root.actionIndex])
+      priv.activate(["auto", "terminal", "copy"][root.actionIndex])
     }
   }
 
@@ -2327,8 +2377,7 @@ Item {
   }
 
   function copyCommandLine(cmdline) {
-    Util.execDetached("printf '%s' " + Util.shellQuote(cmdline) + " | wl-copy")
-    root.osd("⧉", "Command copied")
+    root.copyText(cmdline, "Command copied")
   }
 
   // Form control changes re-assemble the editable command line live; hand
@@ -2340,27 +2389,46 @@ Item {
     if (root.detailCmd) cmdLine.text = CmdModel.assembleCommandLine(root.detailCmd, next)
   }
 
-  function openTerminal(cmdline) {
-    Util.execDetached("xdg-terminal-exec bash -lc " + Util.shellQuote(cmdline + "; exec bash"))
-  }
-
-  // Start-menu behavior: launching an app closes the palette. This is the
-  // same entry point AppLibrary.launch uses (uwsm-app + gtk-launch, so the
-  // app lands in app-graphical.slice rather than the shell's cgroup).
-  function launchAppRecord(rec) {
-    if (!rec || !rec.isApp) return
-    Util.execDetached("uwsm-app -- gtk-launch " + Util.shellQuote(rec.id + ".desktop"))
-    root.osd("󰀻", "Launching " + rec.name + "…")
-    root.noteLaunch(rec.route)
-    root.cancel()
-  }
-
-  function launchApp() { root.launchAppRecord(root.detailCmd) }
+  // ------------------------------------- execution moves to `priv` below
+  // (guarded execution surface — see the QtObject after osd()).
 
   // ---------------------------------------------------------- computed actions
-  // Clipboard write for computed results — same mechanism as copyCommandLine.
+  // Clipboard write for computed results — the payload rides stdin, NEVER
+  // argv: a process's argv is world-readable in /proc/<pid>/cmdline, so
+  // copied text (clipboard-history entries, commands, titles, paths,
+  // results) must not travel there. This was the marketplace review's
+  // second finding: `Util.execDetached("printf … | wl-copy")` put the
+  // whole entry into `bash -lc`'s argv. Quickshell's Process writes to
+  // the child's stdin directly (same pattern omarchy's network panel
+  // uses for the Wi-Fi password), and flipping stdinEnabled off closes
+  // the write channel — the EOF wl-copy needs to finish reading.
+  // Copies queue: a second copy while wl-copy is still draining starts
+  // as soon as the first exits, so no copy is silently dropped.
+  Process {
+    id: clipCopy
+    property var queue: []
+    command: ["wl-copy"]
+    stdinEnabled: true
+    onStarted: {
+      write(queue.length > 0 ? queue[0] : "")
+      stdinEnabled = false      // closeWriteChannel() → wl-copy sees EOF
+    }
+    onExited: {
+      queue.shift()
+      stdinEnabled = true
+      if (queue.length > 0) running = true
+    }
+  }
+
   function copyText(text, message) {
-    Util.execDetached("printf '%s' " + Util.shellQuote(text) + " | wl-copy")
+    // Only the payload travels here; every caller's OSD message is static
+    // (no copied value ever rides an argv either — root.osd spawns
+    // `omarchy-shell osd show <json>`).
+    clipCopy.queue = clipCopy.queue.concat([String(text == null ? "" : text)])
+    if (!clipCopy.running) {
+      clipCopy.stdinEnabled = true
+      clipCopy.running = true
+    }
     root.osd("⧉", message || "Copied")
   }
 
@@ -2375,7 +2443,9 @@ Item {
   // The conditional cd-to-Work mirrors omarchy-agent so agents don't re-ask
   // trust for $HOME on every launch.
   function openAgent(p) {
-    if (!p) return
+    // Shape guard: omarchy's shell-call dispatcher reaches root functions
+    // with one string — an exec sink must see a real row object.
+    if (!p || typeof p !== "object") return
     if (p.mode === "pick") {
       Util.execDetached("bash -lc " + Util.shellQuote("exec " + Agents.pickDefaultAgentCommand()))
       root.osd("󰚩", "Choose a default agent…")
@@ -2406,107 +2476,8 @@ Item {
   // otherwise opens the browser; an agent row opens the terminal (copying the
   // launch command on "copy"); Phase-5 control rows hand off to
   // activateControl, history rows to activateHistoryRow.
-  function activateComputed(action) {
-    var p = root.detailPayload
-    if (!p) return
-    if (p.kind === "calc" || p.kind === "convert") {
-      root.copyText(p.result, "Copied " + p.result)
-      return
-    }
-    if (p.kind === "web") {
-      if (action === "copy") { root.copyText(p.url, "Search URL copied"); return }
-      if (!Controls.isWebUrl(p.url)) { root.osd("⚠", "Not a web link"); return }
-      Qt.openUrlExternally(p.url)
-      root.cancel()
-      return
-    }
-    // Phase-7 providers: window → focus and get out of the way; clipboard
-    // → omarchy's paste helper (copy + type); file → open / cd / copy
-    // path; dictionary → the definition is the answer, so it copies.
-    if (p.kind === "window") {
-      if (action === "copy") {
-        root.copyText(String(p.title || p.class || ""), "Window title copied")
-        return
-      }
-      Quickshell.execDetached(["bash", root.winCtlScript, "focus", String(p.addr || "")])
-      root.cancel()
-      return
-    }
-    if (p.kind === "clip") {
-      if (action === "copy") {
-        if (p.type === "image") root.copyText(String(p.path || ""), "Image path copied")
-        else root.copyText(String(p.text || ""), "Copied to clipboard")
-        return
-      }
-      if (p.type === "image") {
-        Quickshell.execDetached([root.clipPasteFile, String(p.mime || "image/png"),
-          String(p.path || "")])
-      } else {
-        Quickshell.execDetached([root.clipPasteText, "--history-index",
-          String(Number(p.index) || 0)])
-      }
-      root.cancel()
-      return
-    }
-    if (p.kind === "file") {
-      if (action === "copy") { root.copyText(String(p.path || ""), "Path copied"); return }
-      if (action === "terminal") {
-        root.openTerminal("cd " + Util.shellQuote(SearchP.dirOf(String(p.path || ""))))
-        root.cancel()
-        return
-      }
-      Quickshell.execDetached(["xdg-open", String(p.path || "")])
-      root.cancel()
-      return
-    }
-    if (p.kind === "dict") {
-      root.copyText(String(p.definition || ""), "Definition copied")
-      return
-    }
-    if (p.kind === "newsitem") {
-      if (action === "copy") { root.copyText(p.url, "Link copied"); return }
-      if (!Controls.isWebUrl(p.url)) { root.osd("⚠", "Not a web link"); return }
-      Qt.openUrlExternally(String(p.url))
-      root.cancel()
-      return
-    }
-    if (p.kind === "newsrefresh") {
-      root.fetchNews()
-      return
-    }
-    if (p.kind === "newsfeeds") {
-      if (action === "copy") {
-        root.copyText(root.stateDir + "/feeds.json", "Feeds file path copied")
-        return
-      }
-      // User-owned file in the user's own editor — the same shell-string
-      // shape openTerminal already uses for agents ($EDITOR is the
-      // user's environment; the path is our fixed state file, quoted).
-      root.openTerminal("${EDITOR:-nano} " + Util.shellQuote(root.stateDir + "/feeds.json"))
-      root.cancel()
-      return
-    }
-    if (p.kind === "feedadd") {
-      if (action === "copy") { root.copyText(p.url, "Feed URL copied"); return }
-      root.addFeed(String(p.url))
-      return
-    }
-    if (p.kind === "agent") {
-      if (action === "copy") {
-        var c = root.agentCommandFor(p)
-        if (c) root.copyText(c, "Copied launch command")
-        return
-      }
-      root.openAgent(p)
-      return
-    }
-    if (p.kind === "toggle" || p.kind === "panel" || p.kind === "power"
-        || p.kind === "status" || p.kind === "run") {
-      root.activateControl(p, action)
-      return
-    }
-    if (p.kind === "history") root.activateHistoryRow(p)
-  }
+  // ------------------------------------- execution moves to `priv` below
+  // (activate/activateComputed live on the guarded execution surface).
 
   // ------------------------------------------------------ controls actions
   // Toggle / panel / power / status rows (Phase 5). "copy" yields the exact
@@ -2515,13 +2486,13 @@ Item {
   // Power actions that confirm (everything but Lock) stop at the shared
   // dialog; Ctrl+T ("terminal") cannot bypass it.
   function activateControl(p, action) {
-    if (!p) return
+    if (!p || typeof p !== "object") return   // dispatcher shape guard
     var a = Controls.actionById(String(p.actionId || ""))
     if (p.kind === "toggle") {
       if (!a) return
       var tc = Controls.toggleCommand(a, root.controlStates)
       if (action === "copy") { root.copyText(tc, "Copied toggle command"); return }
-      if (action === "terminal") { root.openTerminal(tc); return }
+      if (action === "terminal") { priv.openTerminal(tc); return }
       root.runToggle(a)
       return
     }
@@ -2535,7 +2506,7 @@ Item {
       }
       var pc = "omarchy-shell shell toggle " + panelId
       if (action === "copy") { root.copyText(pc, "Copied command"); return }
-      if (action === "terminal") { root.openTerminal(pc); return }
+      if (action === "terminal") { priv.openTerminal(pc); return }
       root.openPanel(panelId,
         p.kind === "panel" && a ? a.label : String(p.label || "settings"),
         a ? a.glyph : "")
@@ -2544,7 +2515,7 @@ Item {
     if (p.kind === "run") {
       if (!a) return
       if (action === "copy") { root.copyText(a.cmd, "Copied command"); return }
-      if (action === "terminal") { root.openTerminal(a.cmd); return }
+      if (action === "terminal") { priv.openTerminal(a.cmd); return }
       // Static, omarchy-authored command strings (8.6 Super+Space parity,
       // byte-matched to omarchy-menu.jsonc by tests/parity.test.js). Same
       // bash -lc path the menu itself uses (Util.execDetached) — no runtime
@@ -2566,7 +2537,7 @@ Item {
         root.confirmOpen = true
         return
       }
-      if (action === "terminal") { root.openTerminal(a.cmd); return }
+      if (action === "terminal") { priv.openTerminal(a.cmd); return }
       root.runPower(a)
     }
   }
@@ -2574,6 +2545,7 @@ Item {
   // Flip a quick toggle: argv (no shell), optimistic OSD copy, then re-probe
   // so the row's On/Off label reflects reality a moment later.
   function runToggle(a) {
+    if (!a || typeof a !== "object") return   // dispatcher shape guard
     var argv = Controls.toggleArgv(a, root.controlStates)
     if (!argv.length) return
     Quickshell.execDetached(argv)
@@ -2594,6 +2566,7 @@ Item {
   // logout / power-off land on a clean slate. Confirmation (when due) has
   // already happened before this is ever called.
   function runPower(a) {
+    if (!a || typeof a !== "object") return   // dispatcher shape guard
     var argv = Controls.powerArgv(a)
     if (!argv.length) return
     Quickshell.execDetached(argv)
@@ -2607,7 +2580,7 @@ Item {
   // panels step aside); multi-control tiles (audio/power) toggle their
   // anchored popover instead — the "toggle vs dialog" split.
   function activateFooterTile(t, item) {
-    if (!t) return
+    if (!t || typeof t !== "object") return   // dispatcher shape guard
     if (t.popover) {
       if (root.openPopover === String(t.id)) root.openPopover = ""
       else {
@@ -2626,7 +2599,7 @@ Item {
   // the shared dialog (the popover steps aside first); Lock runs now.
   function activatePowerRow(row) {
     root.openPopover = ""
-    if (!row) return
+    if (!row || typeof row !== "object") return   // dispatcher shape guard
     var a = Controls.actionById(String(row.id || ""))
     if (!a) return
     if (row.kind === "panel") { root.openPanel(a.panel, a.label, a.glyph); return }
@@ -2725,10 +2698,10 @@ Item {
   // History row: apps launch again (and re-record); commands jump to their
   // selected row in the All-commands list (they may take arguments).
   function activateHistoryRow(p) {
-    if (!p || !p.route) return
+    if (!p || typeof p !== "object" || !p.route) return   // shape guard
     if (p.isApp) {
       var app = root.appById[String(p.route).slice(4)]
-      if (app) root.launchAppRecord(app)
+      if (app) priv.launchAppRecord(app)
       return
     }
     root.selectRoute(String(p.route))
@@ -2744,42 +2717,9 @@ Item {
     root.rebuildDisplay(true)
   }
 
-  function activate(action) {
-    if (root.detailIsComputed) { root.activateComputed(action); return }
-    var cmd = root.detailCmd
-    if (!cmd) return
-    if (cmd.isApp) { root.launchApp(); return }
-    var cmdline = root.currentCommandLine()
-
-    if (action === "copy") { root.copyCommandLine(cmdline); return }
-    if (action === "terminal") { root.openTerminal(cmdline); root.noteLaunch(cmd.route); return }
-
-    // Smart hybrid default: sudo and interactive commands go to a terminal
-    // (sudo first asking for confirmation), the rest run in the background
-    // with OSD feedback.
-    if (cmd.sudo) {
-      root.pendingCmdline = cmdline
-      root.confirmOpen = true
-      return
-    }
-    if (CmdModel.needsTerminal(cmd)) {
-      root.openTerminal(cmdline)
-      root.noteLaunch(cmd.route)
-    } else {
-      root.runBackground(cmdline, cmd.route)
-    }
-  }
-
-  function runBackground(cmdline, route) {
-    if (runProc.running) {
-      root.osd("󰅚", "Another command is still running")
-      return
-    }
-    runProc.command = ["bash", "-lc", cmdline]
-    runProcRoute = route
-    runProc.running = true
-    root.noteLaunch(route)
-  }
+  // ------------------------------------- execution moves to `priv` below
+  // (activate/runBackground live on the guarded execution surface; key
+  // handlers and dialogs call priv.activate / priv.openTerminal.)
 
   property string runProcRoute: ""
 
@@ -2790,13 +2730,232 @@ Item {
     stderr: StdioCollector { id: runErr; waitForEnd: true }
     onExited: function(exitCode) {
       var detail = exitCode === 0 ? "" : (runErr.text.trim() || runOut.text.trim()).split("\n")[0]
+        .replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 200)
       root.lastRunInfo = runProcRoute + " — " + (exitCode === 0 ? "ok" : "failed (" + exitCode + ")" + (detail ? ": " + detail : ""))
-      root.osd(exitCode === 0 ? "✔" : "✖", root.lastRunInfo)
+      // The OSD message rides argv — route + status only. The command's
+      // OUTPUT line (arbitrary; may contain tokens) stays in the palette.
+      root.osd(exitCode === 0 ? "✔" : "✖",
+        runProcRoute + (exitCode === 0 ? " — ok" : " — failed (" + exitCode + ")"))
     }
   }
 
   function osd(icon, message) {
-    Quickshell.execDetached(["omarchy-shell", "osd", "show", JSON.stringify({ icon: icon, message: message })])
+    // Static messages only: this spawns `omarchy-shell osd show <json>`,
+    // whose argv is world-readable — nothing derived from remote content
+    // or copied payloads may ride here (a length/ASCII scrub is defense
+    // in depth for anything that slips through).
+    var m = String(message == null ? "" : message)
+      .replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 200)
+    Quickshell.execDetached(["omarchy-shell", "osd", "show", JSON.stringify({ icon: icon, message: m })])
+  }
+
+  // ------------------------------------------- guarded execution surface
+  // omarchy's `shell call` dispatcher resolves loader.item[method] and
+  // invokes ANY root-scope function with one caller-chosen string
+  // (verified live during the 8.13 audit). Same-UID only, but that turns
+  // any local process holding the shell socket into a command-execution
+  // deputy. Every function that can EXECUTE something or reach the
+  // network on steerable state therefore lives on this child object —
+  // the dispatcher's root-level property lookup cannot see it. The
+  // sanctioned external surface is the qs IpcHandler: open/close/toggle/
+  // ping (plus open()'s JSON-string shape for the launcher flow).
+  QtObject {
+    id: priv
+
+    function activate(action) {
+      if (root.detailIsComputed) { priv.activateComputed(action); return }
+      var cmd = root.detailCmd
+      if (!cmd) return
+      if (cmd.isApp) { priv.launchApp(); return }
+      var cmdline = root.currentCommandLine()
+
+      if (action === "copy") { root.copyCommandLine(cmdline); return }
+      if (action === "terminal") { priv.openTerminal(cmdline); root.noteLaunch(cmd.route); return }
+
+      // Smart hybrid default: sudo and interactive commands go to a
+      // terminal (sudo first asking for confirmation), the rest run in
+      // the background with OSD feedback.
+      if (cmd.sudo) {
+        root.pendingCmdline = cmdline
+        root.confirmOpen = true
+        return
+      }
+      if (CmdModel.needsTerminal(cmd)) {
+        priv.openTerminal(cmdline)
+        root.noteLaunch(cmd.route)
+      } else {
+        priv.runBackground(cmdline, cmd.route)
+      }
+    }
+
+    function activateComputed(action) {
+      var p = root.detailPayload
+      if (!p) return
+      if (p.kind === "calc" || p.kind === "convert") {
+        // Static OSD message: `root.osd` spawns a process whose argv would
+        // otherwise carry the copied value (payload must not ride argv).
+        root.copyText(p.result, "Result copied")
+        return
+      }
+      if (p.kind === "web") {
+        if (action === "copy") { root.copyText(p.url, "Search URL copied"); return }
+        if (!Controls.isWebUrl(p.url)) { root.osd("⚠", "Not a web link"); return }
+        Qt.openUrlExternally(p.url)
+        root.cancel()
+        return
+      }
+      // Phase-7 providers: window → focus and get out of the way; clipboard
+      // → omarchy's paste helper (copy + type); file → open / cd / copy
+      // path; dictionary → the definition is the answer, so it copies.
+      if (p.kind === "window") {
+        if (action === "copy") {
+          root.copyText(String(p.title || p.class || ""), "Window title copied")
+          return
+        }
+        Quickshell.execDetached(["bash", root.winCtlScript, "focus", String(p.addr || "")])
+        root.cancel()
+        return
+      }
+      if (p.kind === "clip") {
+        if (action === "copy") {
+          if (p.type === "image") root.copyText(String(p.path || ""), "Image path copied")
+          else root.copyText(String(p.text || ""), "Copied to clipboard")
+          return
+        }
+        if (p.type === "image") {
+          Quickshell.execDetached([root.clipPasteFile, String(p.mime || "image/png"),
+            String(p.path || "")])
+        } else {
+          Quickshell.execDetached([root.clipPasteText, "--history-index",
+            String(Number(p.index) || 0)])
+        }
+        root.cancel()
+        return
+      }
+      if (p.kind === "file") {
+        if (action === "copy") { root.copyText(String(p.path || ""), "Path copied"); return }
+        if (action === "terminal") {
+          priv.openTerminal("cd " + Util.shellQuote(SearchP.dirOf(String(p.path || ""))))
+          root.cancel()
+          return
+        }
+        Quickshell.execDetached(["xdg-open", String(p.path || "")])
+        root.cancel()
+        return
+      }
+      if (p.kind === "dict") {
+        root.copyText(String(p.definition || ""), "Definition copied")
+        return
+      }
+      if (p.kind === "newsitem") {
+        if (action === "copy") { root.copyText(p.url, "Link copied"); return }
+        if (!Controls.isWebUrl(p.url)) { root.osd("⚠", "Not a web link"); return }
+        Qt.openUrlExternally(String(p.url))
+        root.cancel()
+        return
+      }
+      if (p.kind === "newsrefresh") {
+        root.fetchNews()
+        return
+      }
+      if (p.kind === "newsfeeds") {
+        if (action === "copy") {
+          root.copyText(root.stateDir + "/feeds.json", "Feeds file path copied")
+          return
+        }
+        // User-owned file in the user's own editor — the same shell-string
+        // shape openTerminal already uses for agents ($EDITOR is the
+        // user's environment; the path is our fixed state file, quoted).
+        priv.openTerminal("${EDITOR:-nano} " + Util.shellQuote(root.stateDir + "/feeds.json"))
+        root.cancel()
+        return
+      }
+      if (p.kind === "feedadd") {
+        if (action === "copy") { root.copyText(p.url, "Feed URL copied"); return }
+        priv.addFeed(String(p.url))
+        return
+      }
+      if (p.kind === "agent") {
+        if (action === "copy") {
+          var c = root.agentCommandFor(p)
+          if (c) root.copyText(c, "Copied launch command")
+          return
+        }
+        root.openAgent(p)
+        return
+      }
+      if (p.kind === "toggle" || p.kind === "panel" || p.kind === "power"
+          || p.kind === "status" || p.kind === "run") {
+        root.activateControl(p, action)
+        return
+      }
+      if (p.kind === "history") root.activateHistoryRow(p)
+    }
+
+    function openTerminal(cmdline) {
+      Util.execDetached("xdg-terminal-exec bash -lc " + Util.shellQuote(cmdline + "; exec bash"))
+    }
+
+    function runBackground(cmdline, route) {
+      if (runProc.running) {
+        root.osd("󰅚", "Another command is still running")
+        return
+      }
+      root.runProcRoute = route
+      runProc.command = ["bash", "-lc", cmdline]
+      runProc.running = true
+      root.noteLaunch(route)
+    }
+
+    // Start-menu behavior: launching an app closes the palette. This is the
+    // same entry point AppLibrary.launch uses (uwsm-app + gtk-launch, so the
+    // app lands in app-graphical.slice rather than the shell's cgroup).
+    function launchAppRecord(rec) {
+      if (!rec || !rec.isApp) return
+      Util.execDetached("uwsm-app -- gtk-launch " + Util.shellQuote(rec.id + ".desktop"))
+      root.osd("󰀻", "Launching " + rec.name + "…")
+      root.noteLaunch(rec.route)
+      root.cancel()
+    }
+
+    function launchApp() { priv.launchAppRecord(root.detailCmd) }
+
+    function addFeed(url) {
+      if (!url) return
+      if (addFeedProc.running) {
+        root.osd(Controls.NEWS_GLYPHS.add, "An add is already running")
+        return
+      }
+      root.osd(Controls.NEWS_GLYPHS.add, "Validating feed…")
+      root.pendingFeedUrl = String(url)
+      root.addFeedError = ""; root.addFeedErrorUrl = ""
+      addFeedProc.command = ["bash", root.addFeedScript]
+      addFeedProc.running = true
+    }
+
+    function fetchHelp() {
+      var cmd = root.detailCmd
+      if (!cmd || cmd.isApp) { root.helpLoading = false; return }
+      if (helpProc.running) return   // in-flight; onExited re-arms the timer
+      // Routes come from the trusted catalog (dispatcher metadata, safe
+      // charset) — sanitized anyway before they touch a shell string.
+      var safe = String(cmd.route).replace(/[^A-Za-z0-9 _-]/g, "")
+      if (!safe) { root.helpLoading = false; return }
+      root.helpRoute = cmd.route
+      helpProc.command = ["bash", "-lc", "exec " + safe + " --help"]
+      helpProc.running = true
+    }
+
+    function activateRecent(index) {
+      var row = recentModel.get(index)
+      if (!row) return
+      if (row.kind === "app") {
+        var app = root.appById[String(row.route).slice(4)]
+        if (app) priv.launchAppRecord(app)
+        return
+      }
+      root.selectRoute(row.route)
+    }
   }
 
   function confirmPending() {
@@ -2808,7 +2967,7 @@ Item {
       if (a) root.runPower(a)
       return
     }
-    root.openTerminal(root.pendingCmdline)
+    priv.openTerminal(root.pendingCmdline)
     root.noteLaunch(root.detailCmd ? root.detailCmd.route : "")
     root.pendingCmdline = ""
   }
@@ -2977,11 +3136,11 @@ Item {
               } else if (k === Qt.Key_Return || k === Qt.Key_Enter) {
                 root.enterPressed(); event.accepted = true
               } else if ((event.modifiers & Qt.ControlModifier) && k === Qt.Key_C && !searchField.selectedText) {
-                if (root.detailIsComputed) root.activateComputed("copy")
+                if (root.detailIsComputed) priv.activateComputed("copy")
                 else root.copyCommandLine(root.currentCommandLine())
                 event.accepted = true
               } else if ((event.modifiers & Qt.ControlModifier) && k === Qt.Key_T) {
-                root.activate("terminal"); event.accepted = true
+                priv.activate("terminal"); event.accepted = true
               }
             }
           }
@@ -3525,7 +3684,7 @@ Item {
               MouseArea {
                 anchors.fill: parent
                 cursorShape: Qt.PointingHandCursor
-                onClicked: root.activateRecent(index)
+                onClicked: priv.activateRecent(index)
               }
 
               ColumnLayout {
@@ -3824,7 +3983,7 @@ Item {
                     onDoubleClicked: {
                       root.selectedCommand = index
                       root.focusPane = 2
-                      root.activate("auto")
+                      priv.activate("auto")
                     }
                   }
 
@@ -4120,7 +4279,7 @@ Item {
                     fontFamily: root.fontFamily
                     foreground: root.foreground
                     accent: root.selectedBorder
-                    onClicked: root.activateComputed()
+                    onClicked: priv.activateComputed()
                   }
 
                   Button {
@@ -4130,7 +4289,7 @@ Item {
                     fontFamily: root.fontFamily
                     foreground: root.foreground
                     accent: root.selectedBorder
-                    onClicked: root.activateComputed()
+                    onClicked: priv.activateComputed()
                   }
 
                   Button {
@@ -4143,7 +4302,7 @@ Item {
                     fontFamily: root.fontFamily
                     foreground: root.foreground
                     accent: root.selectedBorder
-                    onClicked: root.activateComputed()
+                    onClicked: priv.activateComputed()
                   }
 
                   // ---- news card (Phase 6, 8.11 hardened): feed
@@ -4222,7 +4381,7 @@ Item {
                     fontFamily: root.fontFamily
                     foreground: root.foreground
                     accent: root.selectedBorder
-                    onClicked: root.activateComputed()
+                    onClicked: priv.activateComputed()
                   }
 
                   Text {
@@ -4243,7 +4402,7 @@ Item {
                     fontFamily: root.fontFamily
                     foreground: root.foreground
                     accent: root.selectedBorder
-                    onClicked: root.activateComputed()
+                    onClicked: priv.activateComputed()
                   }
 
                   // ---- edit-feeds card: which feeds are configured, then
@@ -4265,7 +4424,7 @@ Item {
                     fontFamily: root.fontFamily
                     foreground: root.foreground
                     accent: root.selectedBorder
-                    onClicked: root.activateComputed()
+                    onClicked: priv.activateComputed()
                   }
 
                   // ---- inline add-feed card: the URL, what will happen,
@@ -4298,7 +4457,7 @@ Item {
                     fontFamily: root.fontFamily
                     foreground: root.foreground
                     accent: root.selectedBorder
-                    onClicked: root.activateComputed()
+                    onClicked: priv.activateComputed()
                   }
 
                   // ---- 8.6 control titles: panel + run cards lead with
@@ -4361,7 +4520,7 @@ Item {
                     fontFamily: root.fontFamily
                     foreground: root.foreground
                     accent: root.selectedBorder
-                    onClicked: root.activateComputed()
+                    onClicked: priv.activateComputed()
                   }
 
                   Button {
@@ -4375,7 +4534,7 @@ Item {
                     fontFamily: root.fontFamily
                     foreground: root.foreground
                     accent: root.selectedBorder
-                    onClicked: root.activateComputed()
+                    onClicked: priv.activateComputed()
                   }
 
                   Button {
@@ -4386,7 +4545,7 @@ Item {
                     fontFamily: root.fontFamily
                     foreground: root.foreground
                     accent: root.selectedBorder
-                    onClicked: root.activateComputed()
+                    onClicked: priv.activateComputed()
                   }
 
                   Button {
@@ -4399,7 +4558,7 @@ Item {
                     fontFamily: root.fontFamily
                     foreground: root.foreground
                     accent: root.selectedBorder
-                    onClicked: root.activateComputed()
+                    onClicked: priv.activateComputed()
                   }
 
                   Button {
@@ -4409,7 +4568,7 @@ Item {
                     fontFamily: root.fontFamily
                     foreground: root.foreground
                     accent: root.selectedBorder
-                    onClicked: root.activateComputed()
+                    onClicked: priv.activateComputed()
                   }
 
                   Button {
@@ -4830,7 +4989,7 @@ Item {
                     label: "▶  Launch"
                     primary: true
                     focused: root.focusPane === 2 && root.actionIndex === 0
-                    onTriggered: { root.focusPane = 2; root.actionIndex = 0; root.activate("auto") }
+                    onTriggered: { root.focusPane = 2; root.actionIndex = 0; priv.activate("auto") }
                   }
                 }
 
@@ -4844,19 +5003,19 @@ Item {
                     label: "▶  Run"
                     primary: true
                     focused: root.focusPane === 2 && root.actionIndex === 0
-                    onTriggered: { root.focusPane = 2; root.actionIndex = 0; root.activate("auto") }
+                    onTriggered: { root.focusPane = 2; root.actionIndex = 0; priv.activate("auto") }
                   }
                   ActionButton {
                     Layout.fillWidth: true
                     label: "Terminal"
                     focused: root.focusPane === 2 && root.actionIndex === 1
-                    onTriggered: { root.focusPane = 2; root.actionIndex = 1; root.activate("terminal") }
+                    onTriggered: { root.focusPane = 2; root.actionIndex = 1; priv.activate("terminal") }
                   }
                   ActionButton {
                     Layout.fillWidth: true
                     label: "Copy"
                     focused: root.focusPane === 2 && root.actionIndex === 2
-                    onTriggered: { root.focusPane = 2; root.actionIndex = 2; root.activate("copy") }
+                    onTriggered: { root.focusPane = 2; root.actionIndex = 2; priv.activate("copy") }
                   }
                 }
 

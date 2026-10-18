@@ -21,6 +21,12 @@ set -euo pipefail
 cache_dir="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-cmdcenter"
 omarchy_path="${OMARCHY_PATH:-/usr/share/omarchy}"
 mkdir -p "$cache_dir"
+chmod 700 "$cache_dir" 2>/dev/null || true   # holds the app/command inventory
+umask 077                                    # every cache file stays owner-only
+# The group descriptions are scraped from the omarchy dispatcher itself —
+# without the binary there is no catalog worth building.
+omarchy_bin=$(command -v omarchy) || omarchy_bin=""
+[[ -n $omarchy_bin ]] || { echo "build-catalog: omarchy not on PATH" >&2; exit 1; }
 
 # --- staleness gate (--if-stale) -------------------------------------------
 # The shell triggers this once per session. If nothing that feeds the cache
@@ -34,7 +40,7 @@ if [[ "${1:-}" == "--if-stale" && -f "$cache_dir/commands.json" ]]; then
     "$HOME/.local/share/applications" \
     "$HOME/.nix-profile/share/applications" \
     "$HOME/.config/omarchy/launcher.hides" \
-    "$(command -v omarchy)" "$0" \
+    "$omarchy_bin" "$0" \
     -newer "$cache" -print -quit 2>/dev/null || true)
   if [[ -z $newer ]]; then
     IFS=':' read -ra _ddirs <<< "${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
@@ -57,7 +63,7 @@ apps_file=$(mktemp)
 trap 'rm -f "$groups_file" "$tsv_file" "$icon_file" "$apps_file"' EXIT
 
 # --- group descriptions, scraped from the omarchy dispatcher itself -------
-groups_json=$(sed -n 's/^GROUP_DESCRIPTIONS\[\([^]]*\)\]="\([^"]*\)"$/\1\t\2/p' "$(command -v omarchy)" \
+groups_json=$(sed -n 's/^GROUP_DESCRIPTIONS\[\([^]]*\)\]="\([^"]*\)"$/\1\t\2/p' "$omarchy_bin" \
   | jq -Rn '[inputs | split("\t") | {key: .[0], value: .[1]}] | from_entries')
 
 # --- hidden desktop-entry ids (Omarchy's own filter, same desktop context) -
@@ -98,6 +104,9 @@ if (( ${#files[@]} > 0 )); then
       r = FILENAME
       sub(/^.*\/applications\//, "", r)
       sub(/\.desktop$/, "", r)
+      # Tabs are legal in Linux filenames — they would shift every TSV
+      # column after id.
+      gsub(/[\t\r\n]/, "-", r)
       gsub(/\//, "-", r)
       return r
     }

@@ -142,15 +142,21 @@ function parse(xml, source) {
     // head of an item; a crafted multi-MB single item becomes a
     // bounded scan instead of a quadratic one.
     var b = chunks[ci].slice(start, start + 65536)
-    var title = stripTags(tag(b, "title"))
-    var url = atomLink(b)
+    // Head window for the lazy regexes: title/link/guid/dates all sit at
+    // an item's head (the code's own invariant), and the window bounds
+    // the opener-attempt × scan-to-item-end worst case on adversarial
+    // (user-subscribed) feeds. The excerpt may legitimately live deeper,
+    // so it still scans the full capped body.
+    var head = b.slice(0, 8192)
+    var title = stripTags(tag(head, "title"))
+    var url = atomLink(head)
     if (!url) {
       // RSS items with only a permalink-shaped <guid> (very common).
-      var guid = stripTags(tag(b, "guid"))
+      var guid = stripTags(tag(head, "guid"))
       if (/^https?:\/\//i.test(guid)) url = guid
     }
-    var dateStr = tag(b, "pubDate") || tag(b, "published")
-      || tag(b, "updated") || tag(b, "date")
+    var dateStr = tag(head, "pubDate") || tag(head, "published")
+      || tag(head, "updated") || tag(head, "date")
     if (!title || !url) continue
     items.push({
       title: title, url: url, published: parseDate(stripTags(dateStr)),
