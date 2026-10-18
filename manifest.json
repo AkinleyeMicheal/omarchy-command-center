@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "fonsgaudii.cmdcenter",
   "name": "Command center",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": "fonsgaudii",
   "description": "Browsable, searchable front-end for every omarchy CLI command",
   "kinds": ["menu", "bar-widget"],
