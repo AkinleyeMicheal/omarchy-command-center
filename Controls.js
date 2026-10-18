@@ -22,6 +22,10 @@
 var SECTION_TOGGLES = "toggles"
 var SECTION_PANELS = "panels"
 var SECTION_SESSION = "session"
+// Super+Space parity rows (8.6): tools = run/panel actions the menu
+// exposes; learn = doc links, which stay search-only (not browsed).
+var SECTION_TOOLS = "tools"
+var SECTION_LEARN = "learn"
 
 var ACTIONS = [
   // ---------------------------------------------------- quick toggles
@@ -72,6 +76,71 @@ var ACTIONS = [
     desc: "Battery, power profile, and charging",
     keywords: ["battery", "power", "charge", "charging", "profile",
       "performance", "upower"] },
+
+  // ------------------------------ tools (8.6: Super+Space menu parity)
+  // Everything here exists in omarchy-menu.jsonc; tests/parity.test.js
+  // asserts the cmd strings byte-match the menu's own action strings.
+  { id: "speedtest", label: "Network speed test", glyph: "󰓅", kind: "panel",
+    section: SECTION_TOOLS, panel: "omarchy.speedtest",
+    desc: "Measure download and upload speed",
+    keywords: ["speed", "speedtest", "speed test", "internet", "bandwidth",
+      "download", "upload", "fast"] },
+  { id: "diskspeedtest", label: "Disk speed test", glyph: "󰋊", kind: "panel",
+    section: SECTION_TOOLS, panel: "omarchy.disk-speedtest",
+    desc: "Benchmark local disk read and write",
+    keywords: ["disk", "disk speed", "ssd", "hdd", "benchmark", "io"] },
+  { id: "colorpicker", label: "Pick color", glyph: "󰃉", kind: "run",
+    section: SECTION_TOOLS, cmd: "pkill hyprpicker || hyprpicker -a",
+    desc: "Sample a screen color to the clipboard",
+    keywords: ["color", "colour", "picker", "hyprpicker", "eyedropper",
+      "hex"] },
+  { id: "changepassword", label: "Change password", glyph: "󰌋", kind: "run",
+    section: SECTION_TOOLS,
+    cmd: "omarchy-launch-floating-terminal-with-presentation passwd",
+    desc: "Change your user password in a floating terminal",
+    keywords: ["password", "passwd", "credential", "change password"] },
+  { id: "switchtheme", label: "Switch theme", glyph: "󰸌", kind: "run",
+    section: SECTION_TOOLS,
+    cmd: 'theme=$(omarchy-theme-switcher); [[ -n $theme ]] && omarchy-theme-set "$theme"',
+    desc: "Pick a theme from previews and apply it",
+    keywords: ["theme", "themes", "switch theme", "appearance", "colorscheme"] },
+  { id: "switchbackground", label: "Switch background", glyph: "󰏍", kind: "run",
+    section: SECTION_TOOLS,
+    cmd: 'background=$(omarchy-theme-bg-switcher); [[ -n $background ]] && omarchy-theme-bg-set "$background"',
+    desc: "Pick a wallpaper and apply it",
+    keywords: ["background", "wallpaper", "bg", "desktop background"] },
+  { id: "switchunlock", label: "Switch unlock screen", glyph: "󰟵", kind: "run",
+    section: SECTION_TOOLS,
+    cmd: 'unlock=$(omarchy-plymouth-switcher); if [[ $unlock == default ]]; then omarchy-launch-floating-terminal-with-presentation omarchy-plymouth-reset; elif [[ -n $unlock ]]; then omarchy-launch-floating-terminal-with-presentation "omarchy-plymouth-set-by-theme $(printf %q "$unlock")"; fi',
+    desc: "Pick the unlock / boot splash style",
+    keywords: ["unlock", "plymouth", "splash", "boot splash", "lock screen style"] },
+
+  // --------------------- learn (8.6: search-only doc links, menu parity)
+  { id: "learn-omarchy", label: "Omarchy manual", glyph: "󰋖", kind: "run",
+    section: SECTION_LEARN,
+    cmd: "omarchy-launch-webapp 'https://omarchy.org/manual/'",
+    desc: "Open the Omarchy manual",
+    keywords: ["omarchy", "manual", "docs", "documentation", "guide"] },
+  { id: "learn-hyprland", label: "Hyprland wiki", glyph: "󰍙", kind: "run",
+    section: SECTION_LEARN,
+    cmd: "omarchy-launch-webapp 'https://wiki.hypr.land/'",
+    desc: "Open the Hyprland wiki",
+    keywords: ["hyprland", "hypr", "wiki", "compositor"] },
+  { id: "learn-arch", label: "Arch wiki", glyph: "󰣇", kind: "run",
+    section: SECTION_LEARN,
+    cmd: "omarchy-launch-webapp 'https://wiki.archlinux.org/title/Main_page'",
+    desc: "Open the Arch Linux wiki",
+    keywords: ["arch", "archlinux", "arch wiki", "wiki"] },
+  { id: "learn-lazyvim", label: "LazyVim keymaps", glyph: "󰌄", kind: "run",
+    section: SECTION_LEARN,
+    cmd: "omarchy-launch-webapp 'https://www.lazyvim.org/keymaps'",
+    desc: "Open the LazyVim keymaps reference",
+    keywords: ["lazyvim", "vim", "neovim", "nvim", "keymaps", "editor keys"] },
+  { id: "learn-bash", label: "Bash cheatsheet", glyph: "󱆃", kind: "run",
+    section: SECTION_LEARN,
+    cmd: "omarchy-launch-webapp 'https://devhints.io/bash'",
+    desc: "Open the Bash cheatsheet",
+    keywords: ["bash", "shell", "cheatsheet", "devhints"] },
 
   // ------------------------------------------- power / session (menu!)
   { id: "lock", label: "Lock", glyph: "", kind: "power",

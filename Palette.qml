@@ -1650,12 +1650,15 @@ Item {
       info.ssid ? "wifi" : "connection", "Connection",
       String(info.ssid || info.connection)))
 
-    // ---- curated actions (table order: toggles, panels, session)
+    // ---- curated actions (table order: toggles, panels, tools, session)
     for (var i = 0; i < Controls.ACTIONS.length; i++) {
       var a = Controls.ACTIONS[i]
       // Session actions the menu gates off (suspend disabled, no hibernate)
       // stay out of the list entirely, exactly like omarchy-menu.jsonc's `when`.
       if (a.kind === "power" && st[a.id] === "hidden") continue
+      // Doc links (8.6 menu parity) are search-only: they'd pad the
+      // browsed list without being controls.
+      if (a.section === Controls.SECTION_LEARN) continue
       rows.push(root.actionRow(a))
     }
     return rows
@@ -1669,6 +1672,8 @@ Item {
       summary = Controls.stateLabel(a.id, st, root.statusInfo.ssid) || "Toggle"
     } else if (a.kind === "panel") {
       summary = a.desc
+    } else if (a.kind === "run") {
+      summary = a.desc || "Runs immediately"
     } else {
       summary = a.confirm ? "Asks before running" : "Runs immediately"
     }
@@ -2462,7 +2467,7 @@ Item {
       return
     }
     if (p.kind === "toggle" || p.kind === "panel" || p.kind === "power"
-        || p.kind === "status") {
+        || p.kind === "status" || p.kind === "run") {
       root.activateControl(p, action)
       return
     }
@@ -2500,6 +2505,19 @@ Item {
       root.openPanel(panelId,
         p.kind === "panel" && a ? a.label : String(p.label || "settings"),
         a ? a.glyph : "")
+      return
+    }
+    if (p.kind === "run") {
+      if (!a) return
+      if (action === "copy") { root.copyText(a.cmd, "Copied command"); return }
+      if (action === "terminal") { root.openTerminal(a.cmd); return }
+      // Static, omarchy-authored command strings (8.6 Super+Space parity,
+      // byte-matched to omarchy-menu.jsonc by tests/parity.test.js). Same
+      // bash -lc path the menu itself uses (Util.execDetached) — no runtime
+      // value ever enters the string, so there is no injection surface.
+      Util.execDetached(a.cmd)
+      root.osd(a.glyph, a.label + "…")
+      root.cancel()
       return
     }
     if (p.kind === "power") {
