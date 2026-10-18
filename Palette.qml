@@ -47,7 +47,6 @@ Item {
     var payload = ({})
     try { payload = JSON.parse(payloadJson || "{}") } catch (e) { payload = ({}) }
     root.opened = true
-    root.showSettings = false   // a summon always lands on the home view
     if (payload.group) {
       root.activeGroup = String(payload.group)
       root.syncGroupSelection()
@@ -83,16 +82,9 @@ Item {
   // The shell's `omarchy-shell shell call <id> <method> <arg>` dispatches
   // through callIfLoaded → loader.item[method]: ROOT scope only. The
   // IpcHandler further down is the qs-native path and is invisible to
-  // that dispatcher — every callable route must exist here (8.5a lesson:
-  // settingsPanel answered "unknown" while living only in the handler;
-  // toggle had the same latent gap). settingsPanel opens the preferences
-  // panel; toggle is the summon twin of open/close.
-  function settingsPanel() {
-    if (!root.opened) root.openPayloadForIpc("")
-    root.showSettings = true
-    return "ok"
-  }
-
+  // that dispatcher — every callable route must exist here (proven when
+  // `toggle` answered "unknown" while living only in the handler; fixed
+  // at root). toggle is the summon twin of open/close.
   function toggle(query) {
     if (root.opened) root.cancel()
     else root.openPayloadForIpc(query)
@@ -345,38 +337,6 @@ Item {
   readonly property string logoScript: Quickshell.env("HOME") + "/.config/omarchy/plugins/fonsgaudii.cmdcenter/player-icon.sh"
   readonly property string mprisCtlScript: Quickshell.env("HOME") + "/.config/omarchy/plugins/fonsgaudii.cmdcenter/mpris-ctl.sh"
   readonly property string raiseScript: Quickshell.env("HOME") + "/.config/omarchy/plugins/fonsgaudii.cmdcenter/raise-player.sh"
-  readonly property string settingsScript: Quickshell.env("HOME") + "/.config/omarchy/plugins/fonsgaudii.cmdcenter/settings-write.sh"
-
-  // ----------------------------------------------- settings storage (8.5a)
-  // User preferences: tile visibility + home-row density. Written only
-  // by settings-write.sh (closed key/value allowlist); this FileView
-  // watches and applies every change live — the shell.json pattern.
-  property var appSettings: ({ weather: true, system: true, density: 70 })
-
-  FileView {
-    id: settingsFile
-    path: root.stateDir + "/settings.json"
-    watchChanges: true
-    printErrors: false
-    onFileChanged: reload()
-    onLoaded: root.applySettings(text())
-  }
-
-  // Strict on read too: anything outside the writer's allowlist falls
-  // back to the default instead of rendering (defense in depth — the
-  // allowlist lives in settings-write.sh).
-  function applySettings(raw) {
-    var s = ({})
-    try { s = JSON.parse(raw || "{}") || ({}) } catch (e) { s = ({}) }
-    var cards = s.cards || ({})
-    var d = Number(s.density)
-    root.appSettings = {
-      weather: cards.weather !== false,
-      system: cards.system !== false,
-      density: (d === 84 || d === 96) ? d : 70
-    }
-  }
-
   readonly property string mediaMemoryScript: Quickshell.env("HOME") + "/.config/omarchy/plugins/fonsgaudii.cmdcenter/media-memory.sh"
   readonly property string idleScript: Quickshell.env("HOME") + "/.config/omarchy/plugins/fonsgaudii.cmdcenter/idle-settings.sh"
 
@@ -594,11 +554,7 @@ Item {
   property string weatherIcon: ""
   property double weatherAt: 0
   readonly property bool homeVisible: root.opened && !root.filterText
-    && root.activeGroup === "*" && !root.showSettings
-  // The settings panel (8.5a): Ctrl+, toggles, Esc closes, typing in the
-  // search field hands focus back to search. Hiding home via homeVisible
-  // also stops the live metrics timer — nothing ticks behind the panel.
-  property bool showSettings: false
+    && root.activeGroup === "*"
   readonly property var homeWeather: Dashboard.parseWeatherLine(root.weatherText)
   // Condition text + country from the probe's third line (wttr.in's j1
   // payload — the same upstream omarchy's own weather commands use).
@@ -2080,8 +2036,6 @@ Item {
     return JSON.stringify({
       states: root.controlStates,
       info: root.statusInfo,
-      settings: root.showSettings,
-      prefs: root.appSettings,
       statusAt: root.statusAt,
       controls: labels(root.controlRows()),
       historyCount: hist.length,
@@ -2309,7 +2263,6 @@ Item {
 
   function enterPressed() {
     if (root.confirmOpen) return
-    if (root.showSettings) return   // the panel is mouse-driven; Enter belongs to search
     if (root.focusPane === 0) {
       root.focusPane = 1
     } else if (root.focusPane === 1) {
@@ -2717,23 +2670,6 @@ Item {
     onExited: shellConfigFile.reload()   // belt & braces if the watcher lags
   }
 
-  // Settings writes follow the idle-chips shape: argv-only into the
-  // allowlisted writer, one in flight at a time; reload on exit is the
-  // belt & braces next to the FileView watcher.
-  Process {
-    id: settingsSetProc
-    running: false
-    command: ["bash", root.settingsScript, "get"]
-    onExited: settingsFile.reload()
-  }
-
-  function setSetting(key, value, label) {
-    if (settingsSetProc.running) return
-    settingsSetProc.command = ["bash", root.settingsScript, "set", key, value]
-    settingsSetProc.running = true
-    root.osd("󰒓", label || key)
-  }
-
   // History row: apps launch again (and re-record); commands jump to their
   // selected row in the All-commands list (they may take arguments).
   function activateHistoryRow(p) {
@@ -2849,16 +2785,6 @@ Item {
       else root.openPayloadForIpc(query)
       return "ok"
     }
-    // Opens the palette straight into the settings panel (8.5a) — the
-    // keyboard equivalent (Ctrl+,) lives in the search-field handler.
-    // Named settingsPanel: bare "settings" answers "unknown" from the
-    // qs ipc dispatch layer (name reserved upstream — ping/close/settingsPanel
-    // all answer fine, only "settings" doesn't).
-    function settingsPanel(): string {
-      if (!root.opened) root.openPayloadForIpc("")
-      root.showSettings = true
-      return "ok"
-    }
     function ping(): string { return "ok" }
   }
 
@@ -2954,9 +2880,6 @@ Item {
             accent: root.selectedBorder
             onTextChanged: {
               root.filterText = text
-              // Typing while the settings panel is up means "search" —
-              // close the panel and let the query through.
-              if (root.showSettings && text.length > 0) root.showSettings = false
               root.rebuildDisplay()
             }
 
@@ -2975,8 +2898,7 @@ Item {
               }
               var k = event.key
               if (k === Qt.Key_Escape) {
-                if (root.showSettings) root.showSettings = false
-                else if (searchField.text) searchField.text = ""
+                if (searchField.text) searchField.text = ""
                 else if (root.focusPane !== 1) root.focusPane = 1
                 else root.cancel()
                 event.accepted = true
@@ -3006,260 +2928,6 @@ Item {
                 event.accepted = true
               } else if ((event.modifiers & Qt.ControlModifier) && k === Qt.Key_T) {
                 root.activate("terminal"); event.accepted = true
-              } else if ((event.modifiers & Qt.ControlModifier) && k === Qt.Key_Comma) {
-                root.showSettings = !root.showSettings; event.accepted = true
-              }
-            }
-          }
-        }
-
-        // ------------------------------------------------ settings (8.5a)
-        // Raycast-style preferences panel: Ctrl+, toggles it, Esc closes,
-        // typing hands focus back to search. Sections ship with their
-        // builds — HOME CARDS + TILE SIZE are live (settings-write.sh,
-        // allowlisted, applied live by the settings FileView); FEEDS and
-        // ENGINE show honest current state until their sections land.
-        // Flickable from the start so later sections need no resize.
-        Item {
-          Layout.fillWidth: true
-          Layout.fillHeight: true
-          visible: root.showSettings
-
-          component SwitchRow: Item {
-            property string label: ""
-            property string settingsKey: ""
-            property bool checked: false
-            Layout.fillWidth: true
-            Layout.preferredHeight: Style.space(26)
-
-            RowLayout {
-              anchors.fill: parent
-              spacing: Style.space(8)
-
-              Text {
-                Layout.fillWidth: true
-                text: label
-                color: root.foreground
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.body
-              }
-              Rectangle {
-                readonly property bool knobOn: checked
-                Layout.preferredWidth: Style.space(26)
-                Layout.preferredHeight: Style.space(14)
-                radius: Style.space(7)
-                color: knobOn ? Util.alpha(root.selectedBorder, 0.85)
-                  : Util.alpha(root.foreground, 0.18)
-                Behavior on color { ColorAnimation { duration: 120 } }
-
-                Rectangle {
-                  width: Style.space(10)
-                  height: Style.space(10)
-                  radius: Style.space(5)
-                  color: root.background
-                  anchors.verticalCenter: parent.verticalCenter
-                  x: parent.knobOn ? parent.width - width - Style.space(2)
-                                    : Style.space(2)
-                  Behavior on x { NumberAnimation { duration: 120 } }
-                }
-              }
-            }
-            MouseArea {
-              anchors.fill: parent
-              hoverEnabled: true
-              cursorShape: Qt.PointingHandCursor
-              onClicked: root.setSetting(settingsKey, checked ? "false" : "true",
-                label + (checked ? " hidden" : " shown"))
-            }
-          }
-
-          Flickable {
-            anchors.fill: parent
-            contentHeight: settingsCol.implicitHeight + Style.space(8)
-            clip: true
-            boundsBehavior: Flickable.StopAtBounds
-
-            ColumnLayout {
-              id: settingsCol
-              width: parent.width
-              spacing: Style.space(8)
-
-              // ---- header
-              RowLayout {
-                Layout.fillWidth: true
-                spacing: Style.space(6)
-
-                Text {
-                  text: "SETTINGS"
-                  color: root.foreground
-                  opacity: 0.5
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                }
-                Item { Layout.fillWidth: true }
-                Text {
-                  text: "Esc to close"
-                  color: root.foreground
-                  opacity: 0.4
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                }
-              }
-
-              Rectangle {
-                Layout.fillWidth: true
-                Layout.preferredHeight: Style.spacing.hairline
-                color: Util.alpha(root.foreground, 0.14)
-              }
-
-              // ---- HOME CARDS
-              Text {
-                text: "HOME CARDS"
-                color: root.foreground
-                opacity: 0.5
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-              }
-              SwitchRow {
-                label: "Weather · Today tile"
-                settingsKey: "cards.weather"
-                checked: root.appSettings.weather
-              }
-              SwitchRow {
-                label: "System & Network tile"
-                settingsKey: "cards.system"
-                checked: root.appSettings.system
-              }
-              Text {
-                Layout.fillWidth: true
-                text: "The media slot keeps its reservation either way — a hidden tile's third is shared by the tiles that remain."
-                color: root.foreground
-                opacity: 0.55
-                wrapMode: Text.Wrap
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-              }
-
-              Rectangle {
-                Layout.fillWidth: true
-                Layout.preferredHeight: Style.spacing.hairline
-                color: Util.alpha(root.foreground, 0.14)
-              }
-
-              // ---- TILE SIZE
-              Text {
-                text: "TILE SIZE"
-                color: root.foreground
-                opacity: 0.5
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-              }
-              RowLayout {
-                Layout.fillWidth: true
-                spacing: Style.space(4)
-
-                Repeater {
-                  model: [
-                    { label: "Standard", v: 70 },
-                    { label: "Tall", v: 84 },
-                    { label: "Extra tall", v: 96 }
-                  ]
-                  delegate: Rectangle {
-                    id: chip
-                    required property var modelData
-                    readonly property bool selected:
-                      modelData.v === root.appSettings.density
-                    Layout.fillWidth: true
-                    Layout.preferredHeight: Style.space(20)
-                    radius: Style.space(6)
-                    color: chipMouse.containsMouse
-                      ? Util.alpha(root.selectedBorder, selected ? 0.32 : 0.16)
-                      : (selected ? Util.alpha(root.selectedBorder, 0.22)
-                                 : Util.alpha(root.foreground, 0.06))
-                    border.width: selected ? Math.max(1, Style.space(1)) : 0
-                    border.color: Util.alpha(root.selectedBorder, 0.6)
-                    Behavior on color { ColorAnimation { duration: 100 } }
-
-                    Text {
-                      anchors.centerIn: parent
-                      text: chip.modelData.label
-                      color: root.foreground
-                      opacity: selected ? 1 : 0.65
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.caption
-                    }
-                    MouseArea {
-                      id: chipMouse
-                      anchors.fill: parent
-                      hoverEnabled: true
-                      cursorShape: Qt.PointingHandCursor
-                      onClicked: root.setSetting("density",
-                        String(chip.modelData.v),
-                        "Tile size " + chip.modelData.label)
-                    }
-                  }
-                }
-              }
-              Text {
-                Layout.fillWidth: true
-                text: "Height of the whole pinned home row — all tiles follow it."
-                color: root.foreground
-                opacity: 0.55
-                wrapMode: Text.Wrap
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-              }
-
-              Rectangle {
-                Layout.fillWidth: true
-                Layout.preferredHeight: Style.spacing.hairline
-                color: Util.alpha(root.foreground, 0.14)
-              }
-
-              // ---- FEEDS (honest current state; the manager lands 8.5b)
-              Text {
-                text: "FEEDS"
-                color: root.foreground
-                opacity: 0.5
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-              }
-              Text {
-                Layout.fillWidth: true
-                text: root.newsFeeds.length
-                  ? root.newsFeeds.length
-                    + " feeds configured — manage them in the News group (Edit feeds)."
-                  : "Feeds load with the News group — open it and choose Edit feeds to configure."
-                color: root.foreground
-                opacity: 0.7
-                wrapMode: Text.Wrap
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.body
-              }
-
-              Rectangle {
-                Layout.fillWidth: true
-                Layout.preferredHeight: Style.spacing.hairline
-                color: Util.alpha(root.foreground, 0.14)
-              }
-
-              // ---- SEARCH ENGINE (display now; picker lands 8.5c)
-              Text {
-                text: "SEARCH ENGINE"
-                color: root.foreground
-                opacity: 0.5
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-              }
-              Text {
-                Layout.fillWidth: true
-                text: "Web search rows open in "
-                  + (root.webEngineName || "your browser's default engine")
-                color: root.foreground
-                opacity: 0.7
-                wrapMode: Text.Wrap
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.body
               }
             }
           }
@@ -3282,7 +2950,7 @@ Item {
         // shifting sideways when a player starts/stops.
         RowLayout {
           Layout.fillWidth: true
-          Layout.preferredHeight: root.homeVisible ? Style.space(root.appSettings.density) : 0
+          Layout.preferredHeight: root.homeVisible ? Style.space(70) : 0
           visible: root.homeVisible
           spacing: Style.spacing.md
 
@@ -3634,7 +3302,6 @@ Item {
           // payload as the condition), and clock · temp — condition.
           // Every row is fillWidth + elide, so nothing overshoots.
           HomeCard {
-            visible: root.appSettings.weather
             caption: root.homeDay.week
 
             ColumnLayout {
@@ -3690,7 +3357,6 @@ Item {
           // tile; values ride the open-cycle status probe (the rates
           // are its 1s window, the totals are since-boot counters).
           HomeCard {
-            visible: root.appSettings.system
             caption: "System & Network"
 
             ColumnLayout {
@@ -3750,7 +3416,7 @@ Item {
           // Clear breathing room under the tall tiles.
           Layout.topMargin: Style.space(12)
           Layout.preferredHeight: visible ? implicitHeight : 0
-          visible: recentModel.count > 0 && !root.filterText && !root.showSettings
+          visible: recentModel.count > 0 && !root.filterText
           spacing: Style.spacing.md
 
           Text {
@@ -3880,7 +3546,7 @@ Item {
         Item {
           Layout.fillWidth: true
           Layout.fillHeight: true
-          visible: !root.rowsLoaded && !root.showSettings
+          visible: !root.rowsLoaded
 
           ColumnLayout {
             anchors.centerIn: parent
@@ -3907,7 +3573,7 @@ Item {
         RowLayout {
           Layout.fillWidth: true
           Layout.fillHeight: true
-          visible: root.rowsLoaded && !root.showSettings
+          visible: root.rowsLoaded
           spacing: Style.spacing.md
 
           // ---- groups pane
