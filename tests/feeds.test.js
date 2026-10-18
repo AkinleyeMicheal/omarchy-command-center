@@ -141,50 +141,16 @@ const ATOM = `<?xml version="1.0" encoding="utf-8"?>
   check("payload: missing feeds → []", itemsFromPayload({}, 10), [])
 }
 
-// ------------------------------------------------------- hero extraction
+// ------------------------------------------------------- initials (8.11)
+// The reader downloads no feed-supplied images: rows and cards show the
+// feed's initials instead of favicons.
 {
-  const media = `<rss><channel><item>
-    <title>Hero</title><link>https://e.com/hero</link>
-    <media:content type="video/mp4" url="https://e.com/v.mp4"/>
-    <media:thumbnail url="https://e.com/thumb.jpg"/>
-  </item></channel></rss>`
-  check("hero: video media:content skipped → thumbnail",
-    parse(media, "X")[0].image, "https://e.com/thumb.jpg")
-
-  const mediaImg = `<rss><channel><item>
-    <title>M</title><link>https://e.com/m</link>
-    <media:content url="https://e.com/pic.png"/>
-  </item></channel></rss>`
-  check("hero: untyped media:content accepted",
-    parse(mediaImg, "X")[0].image, "https://e.com/pic.png")
-
-  const enc = `<rss><channel><item>
-    <title>E</title><link>https://e.com/e</link>
-    <enclosure url="https://e.com/audio.mp3" type="audio/mpeg"/>
-    <enclosure url="https://e.com/pic.jpg?w=800" type="image/jpeg"/>
-  </item></channel></rss>`
-  check("hero: image enclosure wins, audio skipped",
-    parse(enc, "X")[0].image, "https://e.com/pic.jpg?w=800")
-
-  const encExt = `<rss><channel><item>
-    <title>X</title><link>https://e.com/x</link>
-    <enclosure url="https://e.com/pic.webp"/>
-  </item></channel></rss>`
-  check("hero: untyped enclosure accepted by extension",
-    parse(encExt, "X")[0].image, "https://e.com/pic.webp")
-
-  const descImg = `<rss><channel><item>
-    <title>D</title><link>https://e.com/d</link>
-    <description><![CDATA[<p><img src="https://cdn.e.com/lead.png" alt=""></p><p>Body</p>]]></description>
-  </item></channel></rss>`
-  check("hero: first <img> in description used as last resort",
-    parse(descImg, "X")[0].image, "https://cdn.e.com/lead.png")
-
-  const plain = `<rss><channel><item>
-    <title>P</title><link>https://e.com/p</link>
-    <description>no images here</description>
-  </item></channel></rss>`
-  check("hero: none → empty string", parse(plain, "X")[0].image, "")
+  check("initials: two words", initialsFor("Hacker News"), "HN")
+  check("initials: one word", initialsFor("Lobsters"), "L")
+  check("initials: punctuation-only words skipped", initialsFor("the @ 37"), "T3")
+  check("initials: empty", initialsFor(""), "")
+  check("initials: null", initialsFor(null), "")
+  check("initials: unicode", initialsFor("Héllo Wörld"), "HW")
 }
 
 // ---------------------------------------------------------- excerpts
@@ -240,30 +206,38 @@ const ATOM = `<?xml version="1.0" encoding="utf-8"?>
   </item></channel></rss>`
   check("excerpt: Comments link remnant dropped",
     parse(hnComments, "X")[0].excerpt, "")
+}
 
-  const escImg = `<rss><channel><item>
-    <title>I</title><link>https://e.com/i</link>
-    <description>&lt;img src="https://e.com/esc.png"&gt;body&lt;/description&gt;</description>
-  </item></channel></rss>`
-  check("hero: image found inside escaped description",
-    parse(escImg, "X")[0].image, "https://e.com/esc.png")
+// ------------------------------------- feed-borne hang guards (8.11)
+{
+  // A feed of unclosed <item> openers must not make the parser go
+  // quadratic (measured: minutes of frozen shell on QML's JS engine
+  // before the split-based extraction). Correctness check: nothing
+  // parses, and it parses instantly.
+  check("flood: unclosed <item> openers → []",
+    parse("<item><title>x</title>".repeat(20000), "X"), [])
+  // Mixed-case closings still close (the old regex was /i too).
+  const mixed = "<rss><channel><item><title>M</title><link>https://e.com/m</link></ITEM></channel></rss>"
+  check("mixed-case </ITEM> closes", parse(mixed, "X").length, 1)
+  // An unclosed trailing item is dropped (as the old regex did).
+  const trail = "<rss><channel><item><title>Closed</title><link>https://e.com/c</link></item><item><title>Half</title>"
+  check("unclosed trailing item dropped", parse(trail, "X").map((i) => i.title), ["Closed"])
 }
 
 // ------------------------------------------- feed facts on every item
 {
   const payload = {
     fetchedAt: 1, errors: 0,
-    feeds: [{ id: "a", name: "A", url: "https://a.example/feed.xml",
-      logo: "/s/news-img/feed-a.img", xml: RSS }]
+    feeds: [{ id: "a", name: "Hacker News", url: "https://a.example/feed.xml",
+      xml: RSS }]
   }
   const items = itemsFromPayload(payload, 10)
-  check("payload: feed logo rides on items", items[0].logo,
-    "/s/news-img/feed-a.img")
+  check("payload: feed initials ride on items", items[0].initials, "HN")
   check("payload: feed url rides on items", items[0].feedUrl,
     "https://a.example/feed.xml")
   const bare = itemsFromPayload({ feeds: [{ name: "B", xml: RSS }] }, 10)
-  check("payload: missing logo/feedUrl → empty strings",
-    [bare[0].logo, bare[0].feedUrl], ["", ""])
+  check("payload: missing initials/feedUrl → expected defaults",
+    [bare[0].initials, bare[0].feedUrl], ["B", ""])
 }
 
 // ---------------------------------------------------------------- summary

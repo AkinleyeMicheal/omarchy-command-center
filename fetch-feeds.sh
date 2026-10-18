@@ -5,27 +5,25 @@
 # Output: $XDG_STATE_HOME/omarchy-cmdcenter/news.json, written atomically
 # (the palette's FileView watches it and rebuilds the list on change):
 #   { "fetchedAt": <ms>, "errors": <n>,
-#     "feeds": [ { "id", "name", "url", "xml": "<raw response>",
-#                  "logo": "<abs path to cached favicon | ''>" } ] }
+#     "feeds": [ { "id", "name", "url", "xml": "<raw response>" } ] }
 # Raw XML travels embedded (jq -Rs) and is parsed QML-side by the pure
-# FeedParser.js — no XML tooling required on the box. Feed favicons and
-# article hero images are cached under news-img/ (size/time capped;
-# failures are silent — rows fall back to their glyph, cards render
-# without a hero).
+# FeedParser.js — no XML tooling required on the box.
+#
+# SECURITY (8.11): the News group downloads NO feed-supplied images —
+# no item heroes, no favicons. Feed rows/cards render the feed's
+# initials instead (FeedParser.js). The only network activity left in
+# the news pipeline is the feed XML itself, whose URL the USER entered:
+# fetched via fetch-guard.sh's user-seed mode (any host the user chose,
+# including LAN feeds; a feed server's redirect hops must be public or
+# return to the pasted host).
 #
 # --max-age N: exit immediately (no network) when news.json is younger
 # than N seconds — the startup / group-entry trigger uses this so a
 # fresh cache never costs a fetch.
-#
-# --fetch-images name=url …: download article heroes as positional
-# files (item0.img, item1.img, …) named by the QML side; skips files
-# already cached. Never touches news.json.
 set -euo pipefail
 
-# Destination policy for feed-CONTENT-supplied URLs (SSRF): every item
-# image is validated and fetched through fetch-guard.sh — public
-# destinations only, redirects re-checked per hop. See its header for
-# the trust boundary (user-entered feed URLs are honored as-is).
+# Destination policy + validated fetch for the user's feed URLs (and
+# their redirect hops). See fetch-guard.sh's header for the boundary.
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=fetch-guard.sh
 . "$here/fetch-guard.sh"
@@ -34,29 +32,6 @@ state="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-cmdcenter"
 feeds_file="$state/feeds.json"
 news_file="$state/news.json"
 mkdir -p "$state"
-
-# Asset mode (placed before the seed block and the EXIT trap: it needs
-# neither feeds.json nor the feed-fetch temps).
-if [[ "${1:-}" == "--fetch-images" ]]; then
-  mkdir -p "$state/news-img"
-  shift
-  pids=()
-  for pair in "$@"; do
-    name="${pair%%=*}"
-    url="${pair#*=}"
-    [[ -n $name && -n $url && "$name" != "$pair" ]] || continue
-    name=$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '-')
-    dest="$state/news-img/$name.img"
-    if [[ -f $dest ]]; then continue; fi
-    ( tmp=$(mktemp "$state/news-img/.hero.XXXXXX")
-      if netguard_fetch "$url" "$tmp" 4194304 \
-         && [[ -s $tmp ]]; then mv "$tmp" "$dest"; else rm -f "$tmp"; fi
-    ) &
-    pids+=($!)
-  done
-  if ((${#pids[@]})); then wait "${pids[@]}" 2>/dev/null || true; fi
-  exit 0
-fi
 
 # Seed the starter feeds ONCE (decision: ships with optional starter
 # feeds). The file is user-owned afterwards — edit or empty it freely.
@@ -86,44 +61,20 @@ tmps=()
 cleanup() { rm -f "${tmps[@]:-}"; }
 trap cleanup EXIT
 
-# Feed logos, launched in parallel with the feed fetches below: each
-# feed's host favicon (square — the right shape for the 20px row icon),
-# cached under news-img/ and referenced from news.json's logo field.
-# Best effort: a 404 leaves the field empty and the row its glyph.
-# NB: the subshells fork while tmps is still empty, so the inherited
-# EXIT trap in each can only rm "" — the parent's feed temps stay safe.
-mkdir -p "$state/news-img"
-logo_pids=()
-for ((i = 0; i < n; i++)); do
-  fid=$(jq -r ".feeds[$i].id // \"feed$i\"" "$feeds_file")
-  furl=$(jq -r ".feeds[$i].url // \"\"" "$feeds_file")
-  host=$(printf '%s' "$furl" | sed -nE 's#^[a-zA-Z][a-zA-Z0-9+.-]*://([^/]+).*#\1#p')
-  [[ -n $host ]] || continue
-  fid=$(printf '%s' "$fid" | tr -c 'A-Za-z0-9._-' '-')
-  dest="$state/news-img/feed-${fid}.img"
-  if [[ -f $dest ]]; then continue; fi
-  ( tmp=$(mktemp "$state/news-img/.logo.XXXXXX")
-    if netguard_fetch "https://$host/favicon.ico" "$tmp" 524288 \
-       && [[ -s $tmp ]]; then mv "$tmp" "$dest"; else rm -f "$tmp"; fi
-  ) &
-  logo_pids+=($!)
-done
-
 errors=0
 for ((i = 0; i < n; i++)); do
   url=$(jq -r ".feeds[$i].url" "$feeds_file")
   [[ -n $url && $url != null ]] || continue
   f=$(mktemp); tmps+=("$f")
-  if curl -fsSL --max-time 10 --retry 1 --max-filesize 8388608 \
-      --proto '=http,https' --proto-redir '=http,https' \
-      -A "omarchy-cmdcenter/1.0 (RSS reader)" "$url" -o "$f" 2>/dev/null; then
+  # User-seed mode: the pasted URL is honored wherever it points; the
+  # redirect hops beyond it are server-chosen and must be public (or
+  # back on the user's own host).
+  if netguard_fetch_user "$url" "$f" 8388608; then
     got[$i]=$f
   else
     errors=$((errors + 1))
   fi
 done
-
-if ((${#logo_pids[@]})); then wait "${logo_pids[@]}" 2>/dev/null || true; fi
 
 entries="[]"
 for ((i = 0; i < n; i++)); do
@@ -132,13 +83,9 @@ for ((i = 0; i < n; i++)); do
   url=$(jq -r ".feeds[$i].url // \"\"" "$feeds_file")
   if [[ -n ${got[$i]:-} ]]; then xml=$(jq -Rs . < "${got[$i]}")
   else xml='""'; fi
-  fid=$(printf '%s' "$id" | tr -c 'A-Za-z0-9._-' '-')
-  logo_path="$state/news-img/feed-${fid}.img"
-  if [[ -f $logo_path ]]; then logo=$(printf '%s' "$logo_path" | jq -Rs .)
-  else logo='""'; fi
   entries=$(jq -c --arg id "$id" --arg name "$name" --arg url "$url" \
-    --argjson xml "$xml" --argjson logo "$logo" \
-    '. + [{id: $id, name: $name, url: $url, xml: $xml, logo: $logo}]' <<<"$entries")
+    --argjson xml "$xml" \
+    '. + [{id: $id, name: $name, url: $url, xml: $xml}]' <<<"$entries")
 done
 
 # Assemble on a per-run temp name (concurrent runs — startup timer +

@@ -1,12 +1,20 @@
 #!/usr/bin/env bash
-# fetch-guard.sh — destination policy for feed-supplied URLs (8.10, the
-# marketplace's SSRF review point). Content arriving FROM the network
-# (RSS item images) may only cause requests to publicly routable
-# addresses: every URL is scheme-checked, resolved, and validated
-# against the address policy below; redirects are followed manually with
-# the same validation repeated at each hop, and the validated addresses
-# are pinned into curl with --resolve so a DNS rebind between the check
-# and the connect cannot win.
+# fetch-guard.sh — destination policy for content-supplied URLs (8.10
+# the marketplace's SSRF review point; 8.11 hardened it further after a
+# follow-up review caught hex-form IPv4 embeddings). Content arriving
+# FROM the network (a page's declared feed link, MPRIS album art, a
+# feed server's redirect hops) may only cause requests to publicly
+# routable addresses: every URL is scheme-checked, resolved, and
+# validated against the address policy below; redirects are followed
+# manually with the same validation repeated at each hop, and the
+# validated addresses are pinned into curl with --resolve so a DNS
+# rebind between the check and the connect cannot win.
+#
+# NOTE: the News group itself never fetches feed-supplied images at all
+# (rows/cards show feed initials) — the remaining callers are album art
+# (netguard_fetch, strict), a page's declared feed href
+# (netguard_check_url), and the user's own feed URLs and their redirect
+# hops (netguard_fetch_user: seed honored, hops public or same-host).
 #
 # Trust boundary: URLs the USER enters (feed URLs in feeds.json) are the
 # user's own intent and are honored as-is by the feed fetcher; only URLs
@@ -14,6 +22,7 @@
 #
 # Standalone use (tests / debugging):
 #   bash fetch-guard.sh check <url>   exit 0 allowed · 1 blocked · 2 usage
+#   bash fetch-guard.sh fetch|fetch-user <url> <out> [maxbytes]
 #   bash fetch-guard.sh join <base> <location>   print redirect resolution
 set -u
 
@@ -22,15 +31,22 @@ NETGUARD_SCHEME=""
 NETGUARD_HOST=""
 NETGUARD_PORT=""
 NETGUARD_V6=""
+NETGUARD_PARTS_OK=""
 NETGUARD_ADDRS=()
 
 # --- address policy ------------------------------------------------------
 # Publicly routable IPv4? 0 = allowed, 1 = blocked.
 netguard_v4_ok() {
-  local ip=$1 a b c d
+  local ip=$1 a b c d g
   [[ $ip =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
-  a=$((10#${BASH_REMATCH[1]})); b=$((10#${BASH_REMATCH[2]}))
-  c=$((10#${BASH_REMATCH[3]})); d=$((10#${BASH_REMATCH[4]}))
+  # Strict decimal octets: a leading zero is octal to some parsers and
+  # decimal to others (0177.0.0.1) — never accept an ambiguous address.
+  local o1=${BASH_REMATCH[1]} o2=${BASH_REMATCH[2]}
+  local o3=${BASH_REMATCH[3]} o4=${BASH_REMATCH[4]}
+  for g in "$o1" "$o2" "$o3" "$o4"; do
+    [[ $g =~ ^(0|[1-9][0-9]{0,2})$ ]] || return 1
+  done
+  a=$((10#$o1)); b=$((10#$o2)); c=$((10#$o3)); d=$((10#$o4))
   (( a <= 255 && b <= 255 && c <= 255 && d <= 255 )) || return 1
   (( a == 0 || a == 10 || a == 127 )) && return 1          # 0/8, 10/8, 127/8
   (( a == 169 && b == 254 )) && return 1                   # link-local / metadata
@@ -46,18 +62,23 @@ netguard_v4_ok() {
   return 0
 }
 
-# Publicly routable IPv6? 0 = allowed, 1 = blocked. Handles :: expansion,
-# v4-mapped tails (::ffff:127.0.0.1), NAT64 (64:ff9b::/96 embedding v4),
-# ULA/link-local/multicast/loopback/unspecified prefixes.
+# Publicly routable IPv6? 0 = allowed, 1 = blocked. Handles :: expansion
+# and rejects EVERY IPv4-embedding form — dotted (::ffff:127.0.0.1),
+# hex v4-mapped (::ffff:7f00:1), v4-compatible (::7f00:1), NAT64
+# (64:ff9b::/96 and 64:ff9b:1::/48), 6to4 (2002::/16) and Teredo
+# (2001:0::/32). An embedded v4 makes the connection land on (or get
+# relayed to) that v4 address, so an embedding is never a public v6
+# destination — public or private, rejected outright rather than
+# evaluated (the marketplace review caught hex-form embeddings slipping
+# through per-value evaluation). Plus ULA/link-local/site-local/
+# multicast/documentation prefixes.
 netguard_v6_ok() {
-  local ip=${1,,} zone l r x
+  local ip=${1,,} l r x
   ip=${ip%%\%*}                                            # strip %zone
   [[ $ip == *:* ]] || return 1
-  # An embedded dotted IPv4 (mapped/compatible forms): the connection
-  # lands on that v4 address, so its policy decides alone.
-  if [[ $ip == *.* ]]; then
-    netguard_v4_ok "${ip##*:}" && return 0 || return 1
-  fi
+  # Any dotted-quad inside a v6 literal is an embedded IPv4 (mapped or
+  # compatible spelling) — reject outright, whatever the embedded value.
+  [[ $ip != *.* ]] || return 1
   [[ $ip != *::*::* ]] || return 1                         # at most one '::'
   local -a h=() L=() R=()
   if [[ $ip == *::* ]]; then
@@ -85,14 +106,20 @@ netguard_v6_ok() {
   local loop=1
   for ((i = 0; i < 7; i++)); do (( n[i] == 0 )) || loop=0; done
   (( loop && n[7] == 1 )) && return 1                      # ::1
-  # NAT64 64:ff9b::/96 → policy of the embedded v4.
-  if (( n[0] == 16#64 && n[1] == 16#ff9b && n[2] == 0 && n[3] == 0
-        && n[4] == 0 && n[5] == 0 )); then
-    netguard_v4_ok "$(( (n[6] >> 8) & 255 )).$(( n[6] & 255 )).$(( (n[7] >> 8) & 255 )).$(( n[7] & 255 ))" \
-      && return 0 || return 1
-  fi
+  # --- IPv4-embedding forms (checked on the EXPANDED hextets, so hex,
+  # compressed and full spellings all land here): never public.
+  (( (n[0] | n[1] | n[2] | n[3] | n[4]) == 0 && n[5] == 16#ffff )) \
+    && return 1                                            # ::ffff:0:0/96 mapped
+  (( (n[0] | n[1] | n[2] | n[3] | n[4] | n[5]) == 0 )) \
+    && return 1                                            # ::/96 v4-compatible
+  (( n[0] == 16#64 && n[1] == 16#ff9b )) && return 1       # NAT64 64:ff9b::/96,
+  #                                                     64:ff9b:1::/48 (RFC 8215)
+  (( n[0] == 16#2002 )) && return 1                        # 6to4 2002::/16
+  (( n[0] == 16#2001 && n[1] == 0 )) && return 1           # Teredo 2001:0::/32
+  # --- non-embeddable blocked prefixes -----------------------------------
   (( (n[0] & 16#fe00) == 16#fc00 )) && return 1            # fc00::/7 ULA
   (( (n[0] & 16#ffc0) == 16#fe80 )) && return 1            # fe80::/10 link-local
+  (( (n[0] & 16#ffe0) == 16#fec0 )) && return 1            # fec0::/10 site-local
   (( (n[0] & 16#ff00) == 16#ff00 )) && return 1            # ff00::/8 multicast
   (( n[0] == 16#2001 && n[1] == 16#0db8 )) && return 1      # 2001:db8::/32 documentation
   return 0
@@ -111,7 +138,12 @@ netguard_addr_ok() {
 netguard_url_parts() {
   local url=$1 rest
   NETGUARD_SCHEME=""; NETGUARD_HOST=""; NETGUARD_PORT=""; NETGUARD_V6=""
+  NETGUARD_PARTS_OK=""
   NETGUARD_REASON="url rejected"
+  # Raw control characters (CR/LF/TAB and friends) never belong in a
+  # URL — they are header- and parser-smuggling material.
+  [[ ! $url =~ [^[:print:]] ]] \
+    || { NETGUARD_REASON="control characters in url"; return 1; }
   [[ $url =~ ^[Hh][Tt][Tt][Pp][Ss]?:// ]] || { NETGUARD_REASON="not an http(s) url"; return 1; }
   NETGUARD_SCHEME=${BASH_REMATCH[0]%://}
   NETGUARD_SCHEME=${NETGUARD_SCHEME,,}
@@ -124,6 +156,9 @@ netguard_url_parts() {
     [[ $rest == *\]* ]] || { NETGUARD_REASON="bad ipv6 authority"; return 1; }
     NETGUARD_V6=1
     NETGUARD_HOST=${rest#\[}; NETGUARD_HOST=${NETGUARD_HOST%%\]*}
+    # Brackets mean IPv6 literal — a v4 address or a name inside
+    # brackets is parser-differential bait; reject it here.
+    [[ $NETGUARD_HOST == *:* ]] || { NETGUARD_REASON="bad ipv6 authority"; return 1; }
     local tail=${rest#*\]}
     if [[ -n $tail ]]; then
       [[ $tail == :* && ${tail#:} =~ ^[0-9]{1,5}$ ]] || { NETGUARD_REASON="bad port"; return 1; }
@@ -146,6 +181,7 @@ netguard_url_parts() {
   else
     NETGUARD_PORT=80; [[ $NETGUARD_SCHEME == https ]] && NETGUARD_PORT=443
   fi
+  NETGUARD_PARTS_OK=1
   return 0
 }
 
@@ -212,19 +248,43 @@ netguard_join_url() {
 
 # --- validated fetch -----------------------------------------------------
 # netguard_fetch <url> <outfile> <maxbytes> [ua]
-# Single request or a manual redirect chain (default 5 hops); every hop
-# passes netguard_check_url and is pinned to its validated addresses via
-# --resolve. Writes the body to outfile on success; removes outfile and
+# Strict mode: EVERY hop (the seed included) must pass the full public
+# policy. For URLs that come FROM content (album art, declared feed
+# links). Writes the body to outfile on success; removes outfile and
 # returns 1 on any failure (including blocked destinations).
 netguard_fetch() {
-  local url=$1 out=$2 maxbytes=${3:-4194304} ua=${4:-"omarchy-cmdcenter/1.0 (RSS reader)"}
+  netguard_fetch_impl public "$@"
+}
+
+# netguard_fetch_user <url> <outfile> <maxbytes> [ua]
+# User-seed mode: the seed URL is the user's own choice (LAN/homelab
+# feeds included) — validated for scheme/userinfo/port only, never for
+# its address. Every redirect BEYOND it is server-chosen, i.e. content:
+# it must pass the full public policy, or return to the very host the
+# user pasted (same-host port/path redirects a local feed service makes
+# are still the user's own intent).
+netguard_fetch_user() {
+  netguard_fetch_impl user "$@"
+}
+
+netguard_fetch_impl() {
+  local mode=$1 url=$2 out=$3 maxbytes=${4:-4194304} ua=${5:-"omarchy-cmdcenter/1.0 (RSS reader)"}
   [[ -n $url && -n $out ]] || return 1
-  local maxhops=5 hop cur=$url code rc hdr loc ip
+  local maxhops=5 hop cur=$url code rc hdr loc ip seedhost=""
   local -a resolve=()
   hdr=$(mktemp) || return 1
   for ((hop = 0; hop <= maxhops; hop++)); do
-    if ! netguard_check_url "$cur"; then
-      rm -f "$hdr" "$out"; return 1
+    if [[ $mode == user && $hop == 0 ]]; then
+      netguard_url_parts "$cur" || { rm -f "$hdr" "$out"; return 1; }
+      seedhost=${NETGUARD_HOST,,}
+      NETGUARD_ADDRS=()
+    elif ! netguard_check_url "$cur"; then
+      if [[ $mode == user && -n $seedhost && ${NETGUARD_PARTS_OK:-} == 1
+            && ${NETGUARD_HOST,,} == "$seedhost" ]]; then
+        NETGUARD_ADDRS=()          # the user's own host: curl resolves it
+      else
+        rm -f "$hdr" "$out"; return 1
+      fi
     fi
     resolve=()
     if [[ -z ${NETGUARD_V6:-} && ! $NETGUARD_HOST =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -277,11 +337,20 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
       if netguard_check_url "$2"; then echo "allowed: $2"; exit 0; fi
       echo "blocked: $2 (${NETGUARD_REASON})" >&2
       exit 1 ;;
+    fetch | fetch-user)
+      if [[ -z ${2:-} || -z ${3:-} ]]; then
+        echo "usage: fetch-guard.sh $1 <url> <outfile> [maxbytes]" >&2; exit 2; fi
+      if [[ $1 == fetch ]]; then
+        netguard_fetch "$2" "$3" "${4:-4194304}"
+      else
+        netguard_fetch_user "$2" "$3" "${4:-4194304}"
+      fi
+      exit $? ;;
     join)
       [[ -n ${2:-} && -n ${3:-} ]] || { echo "usage: fetch-guard.sh join <base> <location>" >&2; exit 2; }
       netguard_join_url "$2" "$3" || exit 1 ;;
     *)
-      echo "usage: fetch-guard.sh check <url> | join <base> <location>" >&2
+      echo "usage: fetch-guard.sh check <url> | fetch|fetch-user <url> <out> [max] | join <base> <location>" >&2
       exit 2 ;;
   esac
 fi

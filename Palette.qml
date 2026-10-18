@@ -396,26 +396,17 @@ Item {
     root.newsFeeds = payload && payload.feeds
       ? payload.feeds.map(function(f) {
           return { id: String(f.id || ""), name: String(f.name || ""),
-            url: String(f.url || ""), logo: String(f.logo || "") }
+            url: String(f.url || "") }
         })
       : []
     root.newsItems = FeedParser.itemsFromPayload(payload, 80)
     root.newsAt = payload && payload.fetchedAt ? Number(payload.fetchedAt) : 0
     root.newsErrors = payload && payload.errors ? Number(payload.errors) : 0
     root.updateNewsGroupCount()
-    // Best-effort article heroes: positional name=url pairs for the
-    // newest stories; the script skips files already cached, so this is
-    // near-free on every load and only new/missing images cost a fetch.
-    // Destinations are guarded script-side (fetch-guard.sh): feed
-    // content can only cause requests to public addresses, with every
-    // redirect hop re-validated before it is followed.
-    var args = ["bash", root.newsScript, "--fetch-images"]
-    var cap = Math.min(root.newsItems.length, 15)
-    for (var k = 0; k < cap; k++) {
-      var im = root.newsItems[k].image
-      if (im) args.push("item" + k + "=" + im)
-    }
-    if (args.length > 3) Quickshell.execDetached(args)
+    // SECURITY (8.11): no feed-supplied images are ever fetched here —
+    // rows and cards render the feed's initials instead. The only
+    // network activity in the news pipeline is fetch-feeds.sh fetching
+    // the user's own feed URLs.
     if (root.activeGroup === "__news" && !root.filterText) root.rebuildDisplay()
   }
 
@@ -430,8 +421,9 @@ Item {
 
   // News group rows: a refresh row and an edit-feeds row first (age of
   // the last fetch), then the latest stories across every configured
-  // feed — each carrying its feed logo (appIcon role → the row Image),
-  // hero URL, and excerpt for the detail card.
+  // feed — each carrying its feed's initials badge (8.11: no favicons
+  // are downloaded; the identity is the feed name's letters), plus the
+  // excerpt for the detail card.
   function newsRows() {
     var rows = []
     var age = root.newsAt ? Controls.relativeTime(root.newsAt, Date.now()) : ""
@@ -451,11 +443,11 @@ Item {
         it.source + (it.published
           ? " · " + Controls.relativeTime(it.published, Date.now()) : ""),
         { kind: "newsitem", label: it.title, url: it.url,
-          source: it.source, published: it.published, idx: i,
-          image: it.image || "", excerpt: it.excerpt || "",
-          logo: it.logo || "" })
+          source: it.source, published: it.published,
+          initials: it.initials || "",
+          excerpt: it.excerpt || "" })
       row.group = Controls.NEWS_GLYPHS.news
-      row.appIcon = it.logo || ""   // feed favicon → the row's Image slot
+      row.letter = it.initials || ""   // feed initials → the row's badge
       rows.push(row)
     }
     return rows
@@ -1406,7 +1398,7 @@ Item {
   function computedRow(kind, label, summary, payload, appIcon) {
     return {
       route: "", label: label, appIcon: appIcon || "", kind: kind,
-      summary: summary,
+      summary: summary, letter: "",
       group: "", sudo: false, args: 0, recent: false, pinned: false,
       payload: JSON.stringify(payload)
     }
@@ -1839,7 +1831,7 @@ Item {
           label: c.isApp ? c.name : c.bare,
           appIcon: c.isApp ? c.icon : "",
           kind: c.isApp ? "app" : "cmd",
-          summary: c.summary, group: c.group,
+          summary: c.summary, group: c.group, letter: "",
           sudo: c.requiresSudo, args: c.argCount,
           recent: root.recentRoutes.indexOf(c.route) >= 0,
           pinned: root.isPinned(c.route),
@@ -2902,6 +2894,7 @@ Item {
           spacing: Style.spacing.md
 
           Text {
+            textFormat: Text.PlainText
             Layout.fillWidth: true
             text: "󰒓 Command Center"
             color: root.foreground
@@ -2912,6 +2905,7 @@ Item {
           }
 
           Text {
+            textFormat: Text.PlainText
             visible: root.rowsLoaded
             text: root.catalog.length + " commands · " + Math.max(0, groupListModel.count - 5) + " groups · " + root.apps.length + " apps"
             color: root.foreground
@@ -3076,6 +3070,7 @@ Item {
                     visible: status === Image.Ready
                   }
                   Text {
+                    textFormat: Text.PlainText
                     anchors.centerIn: parent
                     visible: ghostArtImage.status !== Image.Ready
                     text: Controls.MEDIA_GLYPHS.music
@@ -3120,6 +3115,7 @@ Item {
                 Layout.fillHeight: true
                 spacing: 0
                 Text {
+                  textFormat: Text.PlainText
                   Layout.fillWidth: true
                   text: root.ghostHasMedia
                     ? String(root.ghostMedia.title || "") : ""
@@ -3131,6 +3127,7 @@ Item {
                   font.weight: Font.DemiBold
                 }
                 Text {
+                  textFormat: Text.PlainText
                   Layout.fillWidth: true
                   text: root.ghostHasMedia
                     ? String(root.ghostMedia.artist || "") : ""
@@ -3143,6 +3140,7 @@ Item {
                 }
                 // Frozen elapsed / total — the last saved position.
                 Text {
+                  textFormat: Text.PlainText
                   Layout.fillWidth: true
                   visible: root.ghostHasMedia && Number(root.ghostMedia.lenUs) > 0
                   text: root.ghostHasMedia
@@ -3258,6 +3256,7 @@ Item {
                     visible: status === Image.Ready
                   }
                   Text {
+                    textFormat: Text.PlainText
                     anchors.centerIn: parent
                     visible: mediaArtImage.status !== Image.Ready
                     text: Controls.MEDIA_GLYPHS.music
@@ -3300,6 +3299,7 @@ Item {
                 spacing: 0
 
                 Text {
+                  textFormat: Text.PlainText
                   Layout.fillWidth: true
                   text: root.nowPlaying ? String(root.nowPlaying.trackTitle || "") : ""
                   color: root.foreground
@@ -3310,6 +3310,7 @@ Item {
                   font.weight: Font.DemiBold
                 }
                 Text {
+                  textFormat: Text.PlainText
                   Layout.fillWidth: true
                   text: root.nowPlaying ? String(root.nowPlaying.trackArtist || "") : ""
                   color: root.foreground
@@ -3322,6 +3323,7 @@ Item {
                 // Elapsed / total (Spotify-style). While dragging the
                 // handle the elapsed side previews the target spot.
                 Text {
+                  textFormat: Text.PlainText
                   Layout.fillWidth: true
                   visible: root.mediaLenUs > 0
                     && (seekZone.dragMode || root.mediaPosUs >= 0)
@@ -3370,6 +3372,7 @@ Item {
 
               // Sat 17 Oct 2026
               Text {
+                textFormat: Text.PlainText
                 Layout.fillWidth: true
                 text: (root.homeDay.weekday
                   ? root.homeDay.weekday.slice(0, 3) : "")
@@ -3383,6 +3386,7 @@ Item {
               }
               // Ibadan, Nigeria
               Text {
+                textFormat: Text.PlainText
                 Layout.fillWidth: true
                 text: [root.homeWeather.city, root.homeWeatherDetail.country]
                   .filter(function(s) { return s }).join(", ")
@@ -3395,6 +3399,7 @@ Item {
               }
               // 14:32 · 28°C - Light rain showers
               Text {
+                textFormat: Text.PlainText
                 Layout.fillWidth: true
                 text: [Dashboard.fmtClock(root.homeDate),
                   [root.homeWeather.temp, root.homeWeatherDetail.condition]
@@ -3440,6 +3445,7 @@ Item {
                       spacing: Style.space(3)
 
                       Text {
+                        textFormat: Text.PlainText
                         text: modelData.l
                         color: root.foreground
                         opacity: 0.5
@@ -3449,6 +3455,7 @@ Item {
                         font.pixelSize: Style.font.caption
                       }
                       Text {
+                        textFormat: Text.PlainText
                         Layout.fillWidth: true
                         text: modelData.v
                         color: root.foreground
@@ -3480,6 +3487,7 @@ Item {
           spacing: Style.spacing.md
 
           Text {
+            textFormat: Text.PlainText
             text: "Recently Used"
             color: root.foreground
             opacity: 0.5
@@ -3547,6 +3555,7 @@ Item {
                     radius: Style.space(4)
                     color: Util.alpha(root.foreground, 0.14)
                     Text {
+                      textFormat: Text.PlainText
                       anchors.centerIn: parent
                       text: root.rowGlyph(kind, group, label)
                       color: root.foreground
@@ -3558,6 +3567,7 @@ Item {
                 }
 
                 Text {
+                  textFormat: Text.PlainText
                   Layout.fillWidth: true
                   text: label
                   color: root.foreground
@@ -3584,6 +3594,7 @@ Item {
                 color: Util.alpha(root.foreground, 0.25)
 
                 Text {
+                  textFormat: Text.PlainText
                   anchors.centerIn: parent
                   text: "✕"
                   color: root.foreground
@@ -3613,6 +3624,7 @@ Item {
             spacing: Style.spacing.md
 
             Text {
+              textFormat: Text.PlainText
               text: root.loadError ? root.loadError : "Loading commands…"
               color: root.foreground
               font.family: root.fontFamily
@@ -3650,6 +3662,7 @@ Item {
               spacing: Style.spacing.xs
 
               Text {
+                textFormat: Text.PlainText
                 text: "GROUPS"
                 color: root.foreground
                 opacity: 0.5
@@ -3701,6 +3714,7 @@ Item {
                     spacing: Style.space(8)
 
                     Text {
+                      textFormat: Text.PlainText
                       text: glyph
                       color: index === root.selectedGroupIndex && !root.filterText ? root.selectedText : root.foreground
                       opacity: 0.85
@@ -3708,6 +3722,7 @@ Item {
                       font.pixelSize: Style.font.body
                     }
                     Text {
+                      textFormat: Text.PlainText
                       Layout.fillWidth: true
                       text: label
                       color: index === root.selectedGroupIndex && !root.filterText ? root.selectedText : root.foreground
@@ -3717,6 +3732,7 @@ Item {
                       font.weight: index === 0 ? Font.DemiBold : Font.Normal
                     }
                     Text {
+                      textFormat: Text.PlainText
                       text: count
                       color: index === root.selectedGroupIndex && !root.filterText ? root.selectedText : root.foreground
                       opacity: 0.5
@@ -3747,6 +3763,7 @@ Item {
                 Layout.fillWidth: true
                 Layout.leftMargin: Style.space(8)
                 Text {
+                  textFormat: Text.PlainText
                   Layout.fillWidth: true
                   text: root.activeGroupLabel.toUpperCase()
                   color: root.foreground
@@ -3757,6 +3774,7 @@ Item {
                   font.letterSpacing: 1
                 }
                 Text {
+                  textFormat: Text.PlainText
                   text: displayModel.count + (root.filterText ? " matches" : "")
                   color: root.foreground
                   opacity: 0.5
@@ -3782,6 +3800,7 @@ Item {
                   required property string kind
                   required property string summary
                   required property string group
+                  required property string letter
                   required property bool sudo
                   required property int args
                   required property bool recent
@@ -3843,11 +3862,15 @@ Item {
                         radius: Style.space(4)
                         color: Util.alpha(root.foreground, 0.14)
                         Text {
+                          textFormat: Text.PlainText
                           anchors.centerIn: parent
-                          // Control + news rows show their curated nerd
-                          // glyph (the table's icon); every other row
-                          // keeps its letter-box initial, as before.
-                          text: kind === "toggle" || kind === "panel"
+                          // Feed rows show the feed's initials badge
+                          // (8.11: no favicons are downloaded); control
+                          // rows show their curated nerd glyph; every
+                          // other row keeps its letter-box initial.
+                          text: kind === "newsitem" && letter !== ""
+                            ? letter
+                            : kind === "toggle" || kind === "panel"
                             || kind === "power" || kind === "status"
                             || kind === "newsitem" || kind === "newsrefresh"
                             || kind === "newsfeeds"
@@ -3860,6 +3883,7 @@ Item {
                         }
                       }
                       Text {
+                        textFormat: Text.PlainText
                         Layout.fillWidth: true
                         text: label
                         color: index === root.selectedCommand ? root.selectedText : root.foreground
@@ -3869,6 +3893,7 @@ Item {
                         font.weight: Font.DemiBold
                       }
                       Text {
+                        textFormat: Text.PlainText
                         visible: recent
                         text: "🕘"
                         color: index === root.selectedCommand ? root.selectedText : root.foreground
@@ -3876,6 +3901,7 @@ Item {
                         font.pixelSize: Style.font.caption
                       }
                       Text {
+                        textFormat: Text.PlainText
                         visible: pinned
                         text: "★"
                         color: index === root.selectedCommand ? root.selectedText : root.foreground
@@ -3883,6 +3909,7 @@ Item {
                         font.pixelSize: Style.font.caption
                       }
                       Text {
+                        textFormat: Text.PlainText
                         visible: sudo
                         text: "sudo"
                         color: index === root.selectedCommand ? root.selectedText : root.foreground
@@ -3890,6 +3917,7 @@ Item {
                         font.pixelSize: Style.font.caption
                       }
                       Text {
+                        textFormat: Text.PlainText
                         visible: args > 0
                         text: "⚙ " + args
                         color: index === root.selectedCommand ? root.selectedText : root.foreground
@@ -3900,6 +3928,7 @@ Item {
                     }
 
                     Text {
+                      textFormat: Text.PlainText
                       Layout.fillWidth: true
                       text: summary
                       color: index === root.selectedCommand ? root.selectedText : root.foreground
@@ -3912,6 +3941,7 @@ Item {
                 }
 
                 Text {
+                  textFormat: Text.PlainText
                   visible: displayModel.count === 0 && root.rowsLoaded
                   anchors.centerIn: parent
                   text: root.filterText ? "No commands match “" + root.filterText + "”" : "No commands in this group"
@@ -3936,6 +3966,7 @@ Item {
 
             // Hints when nothing is selected.
             Text {
+              textFormat: Text.PlainText
               visible: root.detailCmd === null && !root.detailIsComputed
               anchors.centerIn: parent
               width: parent.width - Style.space(32)
@@ -3975,6 +4006,7 @@ Item {
                     ? Style.spacing.xs : Style.spacing.sm
 
                   Text {
+                    textFormat: Text.PlainText
                     text: root.detailKind === "calc" ? "CALCULATION"
                         : root.detailKind === "convert" ? "CONVERSION"
                         : root.detailKind === "web" ? "WEB SEARCH"
@@ -4011,6 +4043,7 @@ Item {
                   }
 
                   Text {
+                    textFormat: Text.PlainText
                     visible: root.detailKind === "calc" || root.detailKind === "convert"
                     Layout.fillWidth: true
                     // Guarded on the field itself: invisible items still
@@ -4030,6 +4063,7 @@ Item {
                   // fields themselves — invisible items still evaluate
                   // bindings, and undefined → QString warns.
                   Text {
+                    textFormat: Text.PlainText
                     visible: {
                       if (root.detailKind === "toggle")
                         return !!root.detailPayload
@@ -4058,6 +4092,7 @@ Item {
                   }
 
                   Text {
+                    textFormat: Text.PlainText
                     visible: !!root.detailPayload
                       && (root.detailPayload.expr || root.detailPayload.query
                           || root.detailPayload.body)
@@ -4111,34 +4146,14 @@ Item {
                     onClicked: root.activateComputed()
                   }
 
-                  // ---- news card (Phase 6): hero image when the feed
-                  // provided one (cached locally by fetch-feeds.sh — a
-                  // missing/failed download just means no hero), then
-                  // title, feed logo + source/age, the feed-provided
-                  // excerpt, and the continue-reading CTA. Ctrl+C copies
-                  // the link.
-                  Rectangle {
-                    visible: root.detailKind === "newsitem" && heroImg.status === Image.Ready
-                    Layout.fillWidth: true
-                    Layout.preferredHeight: Style.space(120)
-                    radius: Style.space(10)
-                    clip: true
-                    color: Util.alpha(root.foreground, 0.06)
-                    Image {
-                      id: heroImg
-                      anchors.fill: parent
-                      source: root.detailKind === "newsitem" && root.detailPayload
-                        && root.detailPayload.image !== ""
-                        ? "file://" + root.stateDir + "/news-img/item"
-                          + root.detailPayload.idx + ".img"
-                        : ""
-                      sourceSize.width: 640
-                      sourceSize.height: 360
-                      fillMode: Image.PreserveAspectCrop
-                      asynchronous: true
-                    }
-                  }
+                  // ---- news card (Phase 6, 8.11 hardened): feed
+                  // initials badge + title, source/age, the feed-
+                  // provided excerpt, and the continue-reading CTA.
+                  // Ctrl+C copies the link. No images are ever
+                  // downloaded for the news pipeline — neither here nor
+                  // in the rows.
                   Text {
+                    textFormat: Text.PlainText
                     visible: root.detailKind === "newsitem" && !!root.detailPayload
                     Layout.fillWidth: true
                     text: root.detailPayload
@@ -4154,17 +4169,26 @@ Item {
                     Layout.fillWidth: true
                     spacing: Style.space(6)
 
-                    Image {
-                      visible: root.detailPayload && root.detailPayload.logo !== ""
-                      source: root.detailPayload && root.detailPayload.logo !== ""
-                        ? "file://" + root.detailPayload.logo : ""
-                      sourceSize.width: 32
-                      sourceSize.height: 32
-                      Layout.preferredWidth: 16
-                      Layout.preferredHeight: 16
-                      fillMode: Image.PreserveAspectFit
+                    Rectangle {
+                      visible: root.detailPayload
+                        && !!String(root.detailPayload.initials || "")
+                      Layout.preferredWidth: 18
+                      Layout.preferredHeight: 18
+                      radius: Style.space(4)
+                      color: Util.alpha(root.foreground, 0.14)
+                      Text {
+                        textFormat: Text.PlainText
+                        anchors.centerIn: parent
+                        text: root.detailPayload
+                          ? String(root.detailPayload.initials || "") : ""
+                        color: root.foreground
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.caption
+                        font.weight: Font.DemiBold
+                      }
                     }
                     Text {
+                      textFormat: Text.PlainText
                       Layout.fillWidth: true
                       text: {
                         if (!root.detailPayload) return ""
@@ -4179,6 +4203,7 @@ Item {
                     }
                   }
                   Text {
+                    textFormat: Text.PlainText
                     visible: root.detailKind === "newsitem" && root.detailPayload
                       && root.detailPayload.excerpt !== ""
                     Layout.fillWidth: true
@@ -4201,6 +4226,7 @@ Item {
                   }
 
                   Text {
+                    textFormat: Text.PlainText
                     visible: root.detailKind === "newsrefresh"
                     Layout.fillWidth: true
                     text: root.newsFeeds.length + " feeds · "
@@ -4223,6 +4249,7 @@ Item {
                   // ---- edit-feeds card: which feeds are configured, then
                   // open the user-owned feeds.json in $EDITOR.
                   Text {
+                    textFormat: Text.PlainText
                     visible: root.detailKind === "newsfeeds"
                     Layout.fillWidth: true
                     text: root.newsFeeds.map(function(f) { return f.name }).join(" · ")
@@ -4244,6 +4271,7 @@ Item {
                   // ---- inline add-feed card: the URL, what will happen,
                   // one action. Enter already runs it (instant kind).
                   Text {
+                    textFormat: Text.PlainText
                     visible: root.detailKind === "feedadd" && !!root.detailPayload
                     Layout.fillWidth: true
                     text: root.detailPayload ? String(root.detailPayload.url || "") : ""
@@ -4254,6 +4282,7 @@ Item {
                     font.pixelSize: Style.font.body
                   }
                   Text {
+                    textFormat: Text.PlainText
                     visible: root.detailKind === "feedadd"
                     Layout.fillWidth: true
                     text: "Fetches the URL, follows any feed it declares, validates it as RSS/Atom, adds it to your feeds, and refreshes the list."
@@ -4277,6 +4306,7 @@ Item {
                   // caption + button (the "nothing on the rightmost panel"
                   // complaint that stalled 8.6's first cut).
                   Text {
+                    textFormat: Text.PlainText
                     visible: root.detailKind === "run"
                       || (root.detailKind === "panel" && !!root.detailPayload
                           && String(root.detailPayload.label || "") !== "")
@@ -4289,6 +4319,7 @@ Item {
                     font.weight: Font.Bold
                   }
                   Text {
+                    textFormat: Text.PlainText
                     visible: (root.detailKind === "run" || root.detailKind === "panel")
                       && !!root.detailPayload
                       && String(root.detailPayload.desc || "") !== ""
@@ -4303,6 +4334,7 @@ Item {
                   // The exact static command a run row will execute — what
                   // Enter fires, what Ctrl+C copies. Wrapped, dimmed, honest.
                   Text {
+                    textFormat: Text.PlainText
                     visible: root.detailKind === "run" && !!root.detailPayload
                       && String(root.detailPayload.cmd || "") !== ""
                     Layout.fillWidth: true
@@ -4409,6 +4441,7 @@ Item {
                     radius: Style.space(8)
                     color: Util.alpha(root.foreground, 0.14)
                     Text {
+                      textFormat: Text.PlainText
                       anchors.centerIn: parent
                       text: root.detailCmd && root.detailCmd.name ? root.detailCmd.name.charAt(0).toUpperCase() : "?"
                       color: root.foreground
@@ -4418,6 +4451,7 @@ Item {
                     }
                   }
                   Text {
+                    textFormat: Text.PlainText
                     Layout.fillWidth: true
                     text: root.detailIsApp && root.detailCmd ? root.detailCmd.name : ""
                     color: root.foreground
@@ -4442,6 +4476,7 @@ Item {
                   spacing: Style.space(10)
 
                   Text {
+                    textFormat: Text.PlainText
                     Layout.fillWidth: true
                     text: root.detailCmd ? root.detailCmd.bare : ""
                     color: root.foreground
@@ -4469,6 +4504,7 @@ Item {
                 }
 
                 Text {
+                  textFormat: Text.PlainText
                   Layout.fillWidth: true
                   visible: !!(root.detailCmd && root.detailCmd.summary.length > 0)
                   text: root.detailCmd ? root.detailCmd.summary : ""
@@ -4492,6 +4528,7 @@ Item {
                     spacing: Style.space(10)
 
                     Text {
+                      textFormat: Text.PlainText
                       Layout.fillWidth: true
                       text: "PARAMETERS"
                       color: root.foreground
@@ -4501,6 +4538,7 @@ Item {
                       font.letterSpacing: 1
                     }
                     Text {
+                      textFormat: Text.PlainText
                       // Static cap — binding this to parent.width would feed
                       // the row's own reflow back into layout (recursive
                       // rearrange warnings).
@@ -4537,6 +4575,7 @@ Item {
                         spacing: 0
 
                         Text {
+                          textFormat: Text.PlainText
                           Layout.fillWidth: true
                           text: tok.kind === "flag" ? tok.label
                             : tok.kind === "keyval" ? tok.key + "=…"
@@ -4548,6 +4587,7 @@ Item {
                           font.pixelSize: Style.font.body
                         }
                         Text {
+                          textFormat: Text.PlainText
                           visible: tok.required !== true
                           text: "optional"
                           color: root.foreground
@@ -4583,6 +4623,7 @@ Item {
                             implicitWidth: optionText.implicitWidth + Style.space(16)
                             implicitHeight: Math.max(Style.space(26), optionText.implicitHeight + Style.space(10))
                             Text {
+                              textFormat: Text.PlainText
                               id: optionText
                               anchors.centerIn: parent
                               text: modelData
@@ -4651,6 +4692,7 @@ Item {
                 }
 
                 Text {
+                  textFormat: Text.PlainText
                   visible: !!(root.detailCmd && root.detailCmd.complex)
                   Layout.fillWidth: true
                   text: root.detailCmd ? ("Subcommand spec: " + root.detailCmd.args + "\nEdit the command line below, or run it in a terminal.") : ""
@@ -4668,6 +4710,7 @@ Item {
                   spacing: Style.spacing.xs
 
                   Text {
+                    textFormat: Text.PlainText
                     text: "EXAMPLES"
                     color: root.foreground
                     opacity: 0.5
@@ -4678,6 +4721,7 @@ Item {
                   Repeater {
                     model: root.detailCmd ? root.detailCmd.examples : []
                     delegate: Text {
+                      textFormat: Text.PlainText
                       required property var modelData
                       Layout.fillWidth: true
                       text: modelData
@@ -4700,6 +4744,7 @@ Item {
                   spacing: Style.spacing.xs
 
                   Text {
+                    textFormat: Text.PlainText
                     text: "HELP"
                     color: root.foreground
                     opacity: 0.5
@@ -4708,6 +4753,7 @@ Item {
                     font.letterSpacing: 1
                   }
                   Text {
+                    textFormat: Text.PlainText
                     visible: root.helpLoading
                     text: "Loading help…"
                     color: root.foreground
@@ -4716,6 +4762,7 @@ Item {
                     font.pixelSize: Style.font.caption
                   }
                   Text {
+                    textFormat: Text.PlainText
                     Layout.fillWidth: true
                     visible: root.helpText.length > 0
                     text: root.helpText
@@ -4733,6 +4780,7 @@ Item {
 
                 // ---- command line + actions
                 Text {
+                  textFormat: Text.PlainText
                   visible: root.detailIsCmd
                   text: "COMMAND LINE"
                   color: root.foreground
@@ -4813,6 +4861,7 @@ Item {
                 }
 
                 Text {
+                  textFormat: Text.PlainText
                   visible: root.detailCmd !== null && root.lastRunInfo.length > 0
                   Layout.fillWidth: true
                   text: root.lastRunInfo
@@ -4864,6 +4913,7 @@ Item {
           spacing: Style.spacing.md
 
           Text {
+            textFormat: Text.PlainText
             Layout.fillWidth: true
             text: "Type to search · ↑↓ move · ←/→ or Tab switch pane · Enter open/run · Ctrl+C copy · Ctrl+T terminal · Esc close"
             color: root.foreground
@@ -4874,6 +4924,7 @@ Item {
           }
 
           Text {
+            textFormat: Text.PlainText
             text: root.loadError.length ? root.loadError : (root.focusPane === 0 ? "groups" : root.focusPane === 1 ? "commands" : "detail")
             color: root.foreground
             opacity: 0.5
@@ -4942,6 +4993,7 @@ Item {
             spacing: 0
 
             Text {
+              textFormat: Text.PlainText
               Layout.fillWidth: true
               Layout.bottomMargin: Style.space(4)
               text: "AUDIO"
@@ -4973,6 +5025,7 @@ Item {
                 spacing: Style.space(8)
 
                 Text {
+                  textFormat: Text.PlainText
                   text: root.statusInfo.outputMuted ? Controls.FOOTER_GLYPHS.volumeOff : Controls.FOOTER_GLYPHS.volume
                   color: root.foreground
                   opacity: 0.85
@@ -4980,6 +5033,7 @@ Item {
                   font.pixelSize: Style.font.body
                 }
                 Text {
+                  textFormat: Text.PlainText
                   Layout.fillWidth: true
                   text: "Output"
                   color: root.foreground
@@ -4987,6 +5041,7 @@ Item {
                   font.pixelSize: Style.font.body
                 }
                 Text {
+                  textFormat: Text.PlainText
                   text: root.statusInfo.outputMuted ? "Muted"
                     : (root.statusInfo.volumePct !== undefined ? root.statusInfo.volumePct + "%" : "")
                   color: root.foreground
@@ -5034,6 +5089,7 @@ Item {
                 spacing: Style.space(8)
 
                 Text {
+                  textFormat: Text.PlainText
                   text: root.statusInfo.micMuted ? Controls.FOOTER_GLYPHS.micOff : Controls.FOOTER_GLYPHS.mic
                   color: root.foreground
                   opacity: 0.85
@@ -5041,6 +5097,7 @@ Item {
                   font.pixelSize: Style.font.body
                 }
                 Text {
+                  textFormat: Text.PlainText
                   Layout.fillWidth: true
                   text: "Input"
                   color: root.foreground
@@ -5048,6 +5105,7 @@ Item {
                   font.pixelSize: Style.font.body
                 }
                 Text {
+                  textFormat: Text.PlainText
                   text: root.statusInfo.micMuted ? "Muted"
                     : (root.statusInfo.inputPct !== undefined ? root.statusInfo.inputPct + "%" : "")
                   color: root.foreground
@@ -5100,6 +5158,7 @@ Item {
                 spacing: Style.space(8)
 
                 Text {
+                  textFormat: Text.PlainText
                   text: Controls.glyphFor("audio")
                   color: root.foreground
                   opacity: 0.85
@@ -5107,6 +5166,7 @@ Item {
                   font.pixelSize: Style.font.body
                 }
                 Text {
+                  textFormat: Text.PlainText
                   Layout.fillWidth: true
                   text: "Open audio settings"
                   color: root.foreground
@@ -5114,6 +5174,7 @@ Item {
                   font.pixelSize: Style.font.body
                 }
                 Text {
+                  textFormat: Text.PlainText
                   text: Controls.FOOTER_GLYPHS.chevron
                   color: root.foreground
                   opacity: 0.4
@@ -5145,6 +5206,7 @@ Item {
             // Omarchy's idle service has no true "never" (0 would fire
             // immediately), so the switch is the real off for both.
             Text {
+              textFormat: Text.PlainText
               Layout.fillWidth: true
               Layout.bottomMargin: Style.space(4)
               text: "IDLE"
@@ -5178,6 +5240,7 @@ Item {
                 RowLayout {
                   Layout.fillWidth: true
                   Text {
+                    textFormat: Text.PlainText
                     Layout.fillWidth: true
                     text: row.title
                     color: root.foreground
@@ -5186,6 +5249,7 @@ Item {
                     font.pixelSize: Style.font.caption
                   }
                   Text {
+                    textFormat: Text.PlainText
                     text: root.idleLabelFor(row.secs)
                     color: root.foreground
                     opacity: 0.5
@@ -5215,6 +5279,7 @@ Item {
                       Behavior on color { ColorAnimation { duration: 100 } }
 
                       Text {
+                        textFormat: Text.PlainText
                         anchors.centerIn: parent
                         text: chip.modelData.label
                         color: root.foreground
@@ -5247,6 +5312,7 @@ Item {
                 spacing: Style.space(8)
 
                 Text {
+                  textFormat: Text.PlainText
                   text: Controls.glyphFor("stayawake")
                   color: root.foreground
                   opacity: 0.85
@@ -5254,6 +5320,7 @@ Item {
                   font.pixelSize: Style.font.body
                 }
                 Text {
+                  textFormat: Text.PlainText
                   Layout.fillWidth: true
                   text: "Stay Awake"
                   color: root.foreground
@@ -5302,6 +5369,7 @@ Item {
             }
 
             Text {
+              textFormat: Text.PlainText
               Layout.fillWidth: true
               Layout.bottomMargin: Style.space(4)
               text: "SESSION & POWER"
@@ -5325,6 +5393,7 @@ Item {
               spacing: Style.space(8)
 
               Text {
+                textFormat: Text.PlainText
                 text: Controls.glyphFor("battery")
                 color: root.foreground
                 opacity: 0.85
@@ -5332,6 +5401,7 @@ Item {
                 font.pixelSize: Style.font.body
               }
               Text {
+                textFormat: Text.PlainText
                 Layout.fillWidth: true
                 text: String(root.statusInfo.battery)
                 color: root.foreground
@@ -5359,6 +5429,7 @@ Item {
                   spacing: Style.space(8)
 
                   Text {
+                    textFormat: Text.PlainText
                     text: modelData.glyph
                     color: root.foreground
                     opacity: 0.85
@@ -5366,6 +5437,7 @@ Item {
                     font.pixelSize: Style.font.body
                   }
                   Text {
+                    textFormat: Text.PlainText
                     Layout.fillWidth: true
                     text: modelData.label
                     color: root.foreground
@@ -5373,6 +5445,7 @@ Item {
                     font.pixelSize: Style.font.body
                   }
                   Text {
+                    textFormat: Text.PlainText
                     visible: modelData.kind === "panel"
                     text: Controls.FOOTER_GLYPHS.chevron
                     color: root.foreground
@@ -5381,6 +5454,7 @@ Item {
                     font.pixelSize: Style.font.caption
                   }
                   Text {
+                    textFormat: Text.PlainText
                     visible: modelData.kind === "power" && modelData.confirm
                     text: "confirm"
                     color: root.foreground
@@ -5482,6 +5556,7 @@ Item {
       spacing: Style.space(1)
 
       Text {
+        textFormat: Text.PlainText
         id: captionText
         visible: text.length > 0
         color: root.foreground
@@ -5512,6 +5587,7 @@ Item {
     Behavior on color { ColorAnimation { duration: 100 } }
 
     Text {
+      textFormat: Text.PlainText
       anchors.centerIn: parent
       text: btn.glyph
       color: root.foreground
@@ -5577,6 +5653,7 @@ Item {
       spacing: Style.space(6)
 
       Text {
+        textFormat: Text.PlainText
         text: String(tile.td.glyph || "")
         color: tile.lit ? root.selectedBorder : root.foreground
         opacity: tile.lit ? 1.0 : 0.68
@@ -5584,6 +5661,7 @@ Item {
         font.pixelSize: Style.font.body + Style.space(2)
       }
       Text {
+        textFormat: Text.PlainText
         visible: !!tile.td.popover
         text: Controls.FOOTER_GLYPHS.chevron
         color: tile.activePopover ? root.selectedBorder : root.foreground
@@ -5645,6 +5723,7 @@ Item {
       radius: Style.space(8)
 
       Text {
+        textFormat: Text.PlainText
         id: tipLabel
         anchors.centerIn: parent
         text: tile.tipText
@@ -5665,6 +5744,7 @@ Item {
     borderSpec: Border.none()
 
     Text {
+      textFormat: Text.PlainText
       id: pillText
       anchors.centerIn: parent
       width: parent.width - Style.space(16)
@@ -5694,6 +5774,7 @@ Item {
     borderSpec: Border.surfaceSpec("menu", "border", btn.focused ? root.selectedBorder : root.border, Math.max(1, Style.space(1)))
 
     Text {
+      textFormat: Text.PlainText
       id: btnText
       anchors.centerIn: parent
       text: btn.label

@@ -81,7 +81,7 @@ for t in tests/*.test.js; do node "$t"; done
 for t in tests/*.test.sh; do bash "$t"; done
 ```
 
-The suite is 885 assertions across ranking, models, providers, panels, power
+The suite is 925 assertions across ranking, models, providers, panels, power
 actions, news feeds, menu parity, recents, and the URL/destination
 security policy. The full build history and
 pitfalls log live in [ROADMAP.md](ROADMAP.md). Mutated state stays in
@@ -93,17 +93,24 @@ pitfalls log live in [ROADMAP.md](ROADMAP.md). Mutated state stays in
 - **Weather** (Open-Meteo, your coordinates), **feeds you entered** in
   News → Edit feeds or Add feed (web URLs only), and the optional
   **ask-an-agent** row (the endpoint you configure) — all user-intent
-  destinations, honored as entered. Links a pasted page *declares*, and
-  every feed-supplied URL, are content and get the guard below; article
-  and search links open only as http(s).
-- **Feed-supplied image URLs** (article heroes and row favicons) pass a
-  destination guard (`fetch-guard.sh`): http(s)
-  only, no userinfo, every resolved address must be publicly routable
-  (loopback, RFC1918, link-local/metadata, CGNAT, ULA/link-local/
-  multicast IPv6, and mapped/NAT64 embeddings are blocked), redirects
-  are followed manually with the same check re-applied at each hop, and
-  the validated addresses are pinned into curl (`--resolve`) so a DNS
-  rebind between check and connect cannot win. No telemetry.
+  destinations, honored as entered (LAN/homelab feeds included). A feed
+  server's redirect hops are server-chosen, so they must be public or
+  return to the host you pasted. Links a pasted page *declares* are
+  content and get the guard below; article and search links open only
+  as http(s).
+- **The News group downloads no feed-supplied images at all** — no
+  article heroes, no favicons. Feed rows and cards show the feed's
+  initials ("Hacker News" → HN), so feed content can never cause a
+  network request beyond the feed XML your own URL points at.
+- **Album art** and declared feed links pass a destination guard
+  (`fetch-guard.sh`): http(s) only, no userinfo, every resolved address
+  must be publicly routable (loopback, RFC1918, link-local/metadata,
+  CGNAT, ambiguous octets like `0177.0.0.1`, and every IPv4-embedding
+  IPv6 form — v4-mapped, v4-compatible, NAT64, 6to4, Teredo — are
+  blocked), redirects are followed manually with the same check
+  re-applied at each hop, and the validated addresses are pinned into
+  curl (`--resolve`) so a DNS rebind between check and connect cannot
+  win. No telemetry.
 
 ## License
 

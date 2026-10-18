@@ -2,7 +2,17 @@
 // (Phase 6). Hand-rolled on purpose: QML's JS engine has no DOMParser,
 // and keeping it pure means node tests drive it with real feed
 // fixtures. Input: raw feed XML (as embedded in news.json by
-// fetch-feeds.sh). Output: items {title, url, published, source}.
+// fetch-feeds.sh). Output: items {title, url, published, source,
+// excerpt, initials, feedUrl}.
+//
+// SECURITY (8.11): the parser extracts NO image URLs from feed content
+// and the reader downloads NO feed-supplied images at all — feed rows
+// and cards render the feed's initials (initialsFor) instead. Every
+// regex is bounded and block extraction is linear by construction: an
+// 8MB feed of unclosed <item> openers used to make the lazy block
+// regex rescan the whole document per opener (minutes of frozen shell
+// on QML's JS engine); the split-based extraction cannot go quadratic.
+// Per-item body cap (64KB) bounds every subsequent scan.
 //
 // Limits (documented, deliberate): no namespaces beyond atom:link's
 // href/rel, no nested item-in-item, no date → published 0 (sorts last).
@@ -17,10 +27,11 @@ function decodeEntities(s) {
 
 function stripTags(s) {
   // Unwrap CDATA BEFORE tag-stripping: stripping `<![CDATA[<p>x</p>]]>`
-  // raw would leave a literal "]]>" in the text.
+  // raw would leave a literal "]]>" in the text. Tag matches are
+  // bounded ({0,4096}): a flood of '<' without '>' must stay linear.
   var t = String(s == null ? "" : s)
     .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")
-    .replace(/<[^>]*>/g, " ")
+    .replace(/<[^>]{0,4096}>/g, " ")
   return decodeEntities(t)
     .replace(/\s+/g, " ")
     // A stripped inline tag between word and punctuation ("</b>," in
@@ -29,22 +40,23 @@ function stripTags(s) {
     .trim()
 }
 
-// First <name>…</name> block's inner text (case-insensitive).
+// First <name>…</name> block's inner text (case-insensitive). The
+// opener's attribute region is bounded like every other scan here.
 function tag(block, name) {
   var m = String(block).match(
-    new RegExp("<" + name + "[^>]*>([\\s\\S]*?)</" + name + ">", "i"))
+    new RegExp("<" + name + "[^>]{0,4096}>([\\s\\S]*?)</" + name + ">", "i"))
   return m ? m[1].trim() : ""
 }
 
 // Atom links: prefer rel="alternate" (or no rel), fall back to the
 // first href, then to a plain <link>…</link> body (RSS-style).
 function atomLink(block) {
-  var links = String(block).match(/<link[^>]*>/gi) || []
+  var links = String(block).match(/<link[^>]{0,4096}>/gi) || []
   var first = ""
   for (var i = 0; i < links.length; i++) {
-    var h = links[i].match(/href="([^"]*)"/i)
+    var h = links[i].match(/href="([^"]{0,4096})"/i)
     if (!h || !h[1]) continue
-    var rel = links[i].match(/rel="([^"]*)"/i)
+    var rel = links[i].match(/rel="([^"]{0,4096})"/i)
     if (!rel || rel[1] === "alternate") return h[1]
     if (!first) first = h[1]
   }
@@ -53,50 +65,10 @@ function atomLink(block) {
 }
 
 // Double-quoted XML attribute reader (single-quote attributes are a
-// documented v1 limit). Entities decoded — image URLs carry &amp;.
+// documented v1 limit). Entities decoded — URLs carry &amp;.
 function attr(tagText, name) {
-  var m = String(tagText).match(new RegExp(name + '="([^"]*)"', "i"))
+  var m = String(tagText).match(new RegExp(name + '="([^"]{0,4096})"', "i"))
   return m ? decodeEntities(m[1]) : ""
-}
-
-// Article hero image, preference order: media:content (image type or
-// untyped), media:thumbnail, enclosure with an image type/extension,
-// then the first <img> the feed embedded in its description HTML.
-// First http(s) candidate wins; none → "" (the row keeps its feed logo,
-// the card simply renders without a hero).
-function heroImage(block) {
-  var cands = []
-  var m, re
-  re = /<media:content\b[^>]*>/gi
-  while ((m = re.exec(block)) !== null) {
-    var t = attr(m[0], "type")
-    if (t && !/^image\//i.test(t)) continue
-    var u = attr(m[0], "url")
-    if (u) cands.push(u)
-  }
-  re = /<media:thumbnail\b[^>]*>/gi
-  while ((m = re.exec(block)) !== null) {
-    var u2 = attr(m[0], "url")
-    if (u2) cands.push(u2)
-  }
-  re = /<enclosure\b[^>]*>/gi
-  while ((m = re.exec(block)) !== null) {
-    var u3 = attr(m[0], "url")
-    if (!u3) continue
-    var t3 = attr(m[0], "type")
-    var isImage = t3 ? /^image\//i.test(t3)
-      : /\.(jpe?g|png|gif|webp|avif)([?#]|$)/i.test(u3)
-    if (isImage) cands.push(u3)
-  }
-  // Decode first: the <img> may sit in escaped HTML (&lt;img src=…&gt;).
-  var desc = decodeEntities(
-    tag(block, "description") || tag(block, "summary") || "")
-  var img = desc.match(/<img[^>]*src\s*=\s*["']([^"']+)["']/i)
-  if (img) cands.push(img[1])
-  for (var i = 0; i < cands.length; i++) {
-    if (/^https?:\/\//i.test(cands[i])) return cands[i]
-  }
-  return ""
 }
 
 // Excerpt-only variant: decode FIRST so escaped markup (&lt;p&gt;…, as
@@ -106,7 +78,7 @@ function heroImage(block) {
 function stripMarkup(s) {
   var t = decodeEntities(String(s == null ? "" : s)
     .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1"))
-  return decodeEntities(t.replace(/<[^>]*>/g, " "))
+  return decodeEntities(t.replace(/<[^>]{0,4096}>/g, " "))
     .replace(/\s+/g, " ")
     .replace(/\s+([,.;:!?)\]”])/g, "$1")
     .trim()
@@ -130,6 +102,23 @@ function excerptText(block, limit) {
   return text.slice(0, cut).trim() + "…"
 }
 
+// Feed avatar letters — what rows and cards show INSTEAD of favicons
+// (the reader downloads no feed-supplied images, so a feed identity is
+// its name's first letters: "Hacker News" → "HN", "Lobsters" → "L").
+// Word-split, first letterish char of up to two words, uppercased;
+// punctuation-only words are skipped.
+function initialsFor(name) {
+  var s = String(name == null ? "" : name).trim()
+  if (!s) return ""
+  var words = s.split(/[\s_\-–—|]+/)
+  var out = ""
+  for (var i = 0; i < words.length && out.length < 2; i++) {
+    var m = words[i].match(/[^\x00-\x7F]|[^!-/:-@\[-`{-~]/)
+    if (m) out += m[0]
+  }
+  return out.toUpperCase()
+}
+
 function parseDate(s) {
   if (!s) return 0
   var t = Date.parse(s)
@@ -139,10 +128,20 @@ function parseDate(s) {
 // One feed's XML → newest-first items. Malformed/empty feeds → [].
 function parse(xml, source) {
   var text = String(xml == null ? "" : xml)
-  var blocks = text.match(/<(item|entry)[\s\S]*?<\/\1>/gi) || []
+  // Linear block extraction: split on the closing tags rather than
+  // scanning per opener (see the header's security note). Every chunk
+  // but the last one is closed by construction; an unclosed trailing
+  // <item> lands in the final chunk and is dropped — the old lazy
+  // regex never matched it either.
+  var chunks = text.split(/<\/(?:item|entry)>/i)
   var items = []
-  for (var i = 0; i < blocks.length; i++) {
-    var b = blocks[i]
+  for (var ci = 0; ci < chunks.length - 1; ci++) {
+    var start = chunks[ci].search(/<(item|entry)/i)
+    if (start < 0) continue
+    // Per-item body cap: title/link/dates/description all sit at the
+    // head of an item; a crafted multi-MB single item becomes a
+    // bounded scan instead of a quadratic one.
+    var b = chunks[ci].slice(start, start + 65536)
     var title = stripTags(tag(b, "title"))
     var url = atomLink(b)
     if (!url) {
@@ -156,8 +155,7 @@ function parse(xml, source) {
     items.push({
       title: title, url: url, published: parseDate(stripTags(dateStr)),
       source: String(source == null ? "" : source),
-      excerpt: excerptText(b, 600),
-      image: heroImage(b)
+      excerpt: excerptText(b, 600)
     })
   }
   items.sort(function(a, b) { return b.published - a.published })
@@ -174,8 +172,9 @@ function itemsFromPayload(payload, cap) {
     if (!f) continue
     var parsed = parse(f.xml, f.name)
     for (var j = 0; j < parsed.length; j++) {
-      // Feed-level facts ride on every item (row logo + card footer).
-      parsed[j].logo = String(f.logo || "")
+      // Feed-level facts ride on every item (row initials + card
+      // footer); the feed URL stays user-side data, never fetched.
+      parsed[j].initials = initialsFor(f.name)
       parsed[j].feedUrl = String(f.url || "")
       out.push(parsed[j])
     }

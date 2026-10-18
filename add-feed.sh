@@ -47,12 +47,13 @@ trap cleanup EXIT
 UA="omarchy-cmdcenter/1.0 (RSS reader)"
 probe=$(mktemp); tmps+=("$probe")
 
-curl -fsSL --max-time 15 --max-filesize 8388608 \
-  --proto '=http,https' --proto-redir '=http,https' \
-  -A "$UA" "$url" -o "$probe" 2>/dev/null \
+# Probe the pasted URL: user-seed mode (any host the user chose; a
+# redirect beyond it must be public or return to the pasted host).
+netguard_fetch_user "$url" "$probe" 8388608 "$UA" \
   || { echo "could not fetch $url" >&2; exit 4; }
 
 feed_url="$url"
+feed_mode=user
 if ! head -c 512 "$probe" | grep -qiE '<\?xml|<rss|<feed[ >]'; then
   # HTML page: take the feed IT declares (rel=alternate + rss/atom/xml).
   href=$(grep -oiE '<link[^>]*rel="alternate"[^>]*>' "$probe" \
@@ -63,9 +64,10 @@ if ! head -c 512 "$probe" | grep -qiE '<\?xml|<rss|<feed[ >]'; then
     http://*|https://*)
       feed_url="$href"
       # Content-declared absolute URL → public destinations only
-      # (fetch-guard.sh: the same policy every item image obeys).
+      # (fetch-guard.sh: the strict mode, redirects included).
       netguard_check_url "$feed_url" \
         || { echo "declared feed host not allowed (${NETGUARD_REASON})" >&2; exit 4; }
+      feed_mode=public
       ;;
     /*)
       feed_url="$(printf '%s' "$url" | sed -E 's#^([a-zA-Z][a-zA-Z0-9+.-]*://[^/]+).*#\1#')$href"
@@ -74,10 +76,15 @@ if ! head -c 512 "$probe" | grep -qiE '<\?xml|<rss|<feed[ >]'; then
       feed_url="$(printf '%s' "$url" | sed -E 's#^(.*/)[^/]*$#\1/')$href"
       ;;
   esac
-  curl -fsSL --max-time 15 --max-filesize 8388608 \
-    --proto '=http,https' --proto-redir '=http,https' \
-    -A "$UA" "$feed_url" -o "$probe" 2>/dev/null \
-    || { echo "declared feed $feed_url not fetchable" >&2; exit 4; }
+  # A relative declared href stays on the host the USER chose → seed
+  # mode; an absolute declared one is content → strict mode.
+  if [[ $feed_mode == public ]]; then
+    netguard_fetch "$feed_url" "$probe" 8388608 "$UA" \
+      || { echo "declared feed $feed_url not fetchable" >&2; exit 4; }
+  else
+    netguard_fetch_user "$feed_url" "$probe" 8388608 "$UA" \
+      || { echo "declared feed $feed_url not fetchable" >&2; exit 4; }
+  fi
 fi
 
 head -c 512 "$probe" | grep -qiE '<\?xml|<rss|<feed[ >]' \

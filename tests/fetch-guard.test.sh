@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# fetch-guard.test.sh — destination policy for feed-supplied URLs (8.10,
-# the marketplace SSRF review point): scheme rejection, address policy
-# (v4 + v6 + mapped/NAT64 embeddings + obfuscated literals), userinfo,
-# redirect joining, and end-to-end rejection in the image fetcher.
+# fetch-guard.test.sh — destination policy for content-supplied URLs
+# (8.10 the marketplace SSRF review point; 8.11 the follow-up that
+# hardened IPv4-embedding v6 forms, ambiguous octets, control chars and
+# the user-seed redirect boundary): scheme rejection, address policy
+# (v4 + v6 + every embedding form + obfuscated literals), userinfo,
+# redirect joining, seed-mode semantics, and wiring canaries pinning
+# the news pipeline image-free.
 # Offline by default: only the single marked "live" case needs network
 # and is skipped (not counted) when none is available.
 # Run: bash tests/fetch-guard.test.sh
@@ -41,6 +44,8 @@ allow() { bash "$guard" check "$1" >/dev/null 2>&1; echo $?; }
 expect_exit "no args" 2 "$(bash "$guard" >/dev/null 2>&1; echo $?)"
 expect_exit "empty url" 2 "$(bash "$guard" check "" >/dev/null 2>&1; echo $?)"
 expect_exit "unknown verb" 2 "$(bash "$guard" frobnicate >/dev/null 2>&1; echo $?)"
+expect_exit "fetch missing outfile" 2 \
+  "$(bash "$guard" fetch "https://a.b/c" >/dev/null 2>&1; echo $?)"
 
 # --- scheme / syntax rejections -------------------------------------------
 for u in "file:///etc/passwd" "ftp://example.com/x" "gopher://127.0.0.1/" \
@@ -59,6 +64,12 @@ for u in "http://127.0.0.1/" "http://127.0.0.1:631/" "http://10.1.2.3/" \
          "http://198.18.0.1/" "http://192.0.2.1/" "http://198.51.100.7/" \
          "http://203.0.113.9/" "http://0177.0.0.1/"; do
   expect_exit "v4 reject $u" 1 "$(block "$u")"
+done
+
+# --- ambiguous octets (leading zeros: octal to some parsers) -------------
+for u in "http://093.184.216.34/" "http://001.002.003.004/" \
+         "http://127.00.00.001/" "http://010.1.1.1/"; do
+  expect_exit "leading-zero reject $u" 1 "$(block "$u")"
 done
 
 # --- hostname rejections (resolve to private, or unresolvable) ------------
@@ -88,11 +99,39 @@ expect_exit "unbracketed v6" 1 "$(block "http://::1/")"
 # --- IPv6 destination rejections ------------------------------------------
 for u in "http://[::1]/" "http://[::]/" "http://[fc00::1]/" \
          "http://[fd12:3456::1]/" "http://[fe80::1]/" "http://[ff02::1]/" \
-         "http://[::ffff:127.0.0.1]/" "http://[::ffff:169.254.169.254]/" \
+         "http://[fec0::1]/" "http://[::ffff:127.0.0.1]/" \
+         "http://[::ffff:169.254.169.254]/" \
          "http://[64:ff9b::7f00:1]/" "http://[2001:db8::1]/" \
          "http://[0:0:0:0:0:0:0:1]/"; do
   expect_exit "v6 reject $u" 1 "$(block "$u")"
 done
+
+# --- IPv4-EMBEDDING IPv6 forms (the 8.11 review point: hex as well as
+# dotted spellings, checked on expanded hextets — every embedding is
+# rejected outright, whatever the embedded value) --------------------------
+for u in "http://[::ffff:7f00:1]/" "http://[::FFFF:7F00:1]/" \
+         "http://[0:0:0:0:0:ffff:7f00:1]/" "http://[::ffff:a00:1]/" \
+         "http://[::ffff:c0a8:1]/" "http://[::ffff:a9fe:a9fe]/" \
+         "http://[::ffff:127.0.0.1]/" "http://[::ffff:93.184.216.34]/" \
+         "http://[::7f00:1]/" "http://[::a00:1]/" "http://[::127.0.0.1]/" \
+         "http://[64:ff9b::5db8:d122]/" "http://[64:ff9b:1::7f00:1]/" \
+         "http://[2002:7f00:1::]/" "http://[2002:c0a8:101::]/" \
+         "http://[2001:0:7f00:1::]/"; do
+  expect_exit "embed reject $u" 1 "$(block "$u")"
+done
+expect_contains "hex-mapped reason" \
+  "$(bash "$guard" check "http://[::ffff:7f00:1]/" 2>&1)" "address not public"
+
+# --- bracketed authority is v6-literal only (parser-differential bait) ----
+expect_exit "bracketed v4" 1 "$(block "http://[127.0.0.1]/")"
+expect_exit "bracketed public v4" 1 "$(block "http://[93.184.216.34]/")"
+expect_exit "bracketed name" 1 "$(block "http://[evil.com]/")"
+
+# --- control characters never survive url parsing -------------------------
+expect_exit "tab in url" 1 "$(block $'http://exa\tmple.com/')"
+expect_exit "newline in url" 1 "$(block $'http://evil.com\nx')"
+expect_contains "control-char reason" \
+  "$(bash "$guard" check $'http://evil\n.com/' 2>&1)" "control characters"
 
 # --- public destinations allowed ------------------------------------------
 expect_exit "public literal v4" 0 "$(allow "https://93.184.216.34/")"
@@ -119,15 +158,11 @@ expect_eq "join no-dir base" "https://a.b/p.png" "$(j "https://a.b/img" "p.png")
 expect_eq "join trims spaces" "https://x.y/z" "$(j "https://a.b/c" " https://x.y/z ")"
 expect_exit "join missing location" 2 "$(bash "$guard" join "https://a.b/c" "" >/dev/null 2>&1; echo $?)"
 
-# --- e2e: the image fetcher silently drops blocked urls -------------------
+# --- the news pipeline writes no feed-supplied images (8.11) --------------
+# The --fetch-images mode is gone by design: feed content can no longer
+# cause ANY download. The wiring canaries below pin that shut.
 sb=$(mktemp -d)
 trap 'rm -rf "$sb"' EXIT
-rc=$(XDG_STATE_HOME="$sb" bash ./fetch-feeds.sh --fetch-images \
-      "item0=http://127.0.0.1:9/evil" "item1=file:///etc/passwd" \
-      "item2=http://169.254.169.254/x" "item3=http://[::1]/x" >/dev/null 2>&1; echo $?)
-expect_eq "fetch-images blocked exit" "0" "$rc"
-expect_eq "fetch-images wrote nothing" "0" \
-  "$(find "$sb/omarchy-cmdcenter/news-img" -name '*.img' 2>/dev/null | wc -l | tr -d ' ')"
 
 # --- fetch-art destination contract ---------------------------------------
 expect_exit "art private dest ->4" 4 "$(bash ./fetch-art.sh "http://192.168.88.1/x" >/dev/null 2>&1; echo $?)"
@@ -147,22 +182,40 @@ expect_exit "player-icon traversal reject" 4 \
   "$(bash ./player-icon.sh "../evil" >/dev/null 2>&1; echo $?)"
 
 # --- wiring canaries (the security plumbing must stay connected) ----------
-expect_eq "add-feed pins curl protocols" "2" \
-  "$(grep -c -- "--proto '=http,https'" add-feed.sh)"
-expect_eq "fetch-feeds pins feed curl protocols" "1" \
-  "$(grep -c -- "--proto '=http,https'" fetch-feeds.sh)"
-expect_eq "fetch-feeds routes images via guard" "2" \
-  "$(grep -c "netguard_fetch" fetch-feeds.sh)"
-expect_eq "fetch-art routes downloads via guard" "1" \
-  "$(grep -c "netguard_fetch" fetch-art.sh)"
+expect_eq "fetch-guard pins curl protocols" "1" \
+  "$(grep -c -- "--proto '=http,https'" fetch-guard.sh)"
+expect_eq "no raw curl left in fetch-feeds" "0" \
+  "$(grep -c 'curl -' fetch-feeds.sh)"
+expect_eq "no raw curl left in add-feed" "0" \
+  "$(grep -c 'curl -' add-feed.sh)"
+expect_eq "fetch-feeds uses user-seed guarded fetch" "1" \
+  "$(grep -c 'netguard_fetch_user' fetch-feeds.sh)"
+expect_eq "add-feed routes every fetch via guard" "3" \
+  "$(grep -c 'netguard_fetch' add-feed.sh)"
 expect_eq "add-feed guards declared hrefs" "1" \
   "$(grep -c "netguard_check_url" add-feed.sh)"
+expect_eq "fetch-art routes downloads via guard" "1" \
+  "$(grep -c "netguard_fetch" fetch-art.sh)"
 expect_eq "Palette gates openUrlExternally" "2" \
   "$(grep -c "Controls.isWebUrl" Palette.qml)"
 expect_eq "Controls exports isWebUrl" "1" \
   "$(grep -c "function isWebUrl" Controls.js)"
 expect_eq "win-ctl eval arg stays address-shaped" "1" \
   "$(grep -c '0x\[0-9a-fA-F\]' win-ctl.sh)"
+
+# --- 8.11: the news pipeline downloads NO feed-supplied images ------------
+expect_eq "fetch-feeds has no image fetching" "0" \
+  "$(grep -c 'news-img\|--fetch-images' fetch-feeds.sh)"
+expect_eq "Palette has no news-img refs" "0" "$(grep -c 'news-img' Palette.qml)"
+expect_eq "FeedParser extracts no image urls" "0" \
+  "$(grep -c 'heroImage\|media:content\|enclosure' FeedParser.js)"
+expect_eq "FeedParser exports initialsFor" "1" \
+  "$(grep -c 'function initialsFor' FeedParser.js)"
+# Feed-derived strings render as plain text everywhere in the palette
+# (a feed title must never be interpreted as rich text).
+expect_eq "every Palette Text renders plain" \
+  "$(grep -cE '^[[:space:]]*(delegate: )?Text \{$' Palette.qml)" \
+  "$(grep -c 'textFormat: Text.PlainText' Palette.qml)"
 
 # --- add-feed: content-declared href gets the destination guard -----------
 if command -v python3 >/dev/null 2>&1; then
@@ -201,6 +254,56 @@ XML
   fi
   kill "$srv" 2>/dev/null || true
   wait "$srv" 2>/dev/null || true
+
+  # --- user-seed mode e2e: the pasted URL is honored wherever it points;
+  # redirect hops are server-chosen (content) and must be public or
+  # return to the pasted host ------------------------------------------
+  rport=$((26000 + RANDOM % 7000))
+  cat > "$sb/redir.py" <<'PY'
+import http.server, sys
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        port = sys.argv[1]
+        if self.path == "/seed":
+            self.send_response(302); self.send_header("Location", "/inner"); self.end_headers()
+        elif self.path == "/cross":
+            self.send_response(302); self.send_header("Location", "http://127.0.0.2:" + port + "/inner"); self.end_headers()
+        elif self.path == "/v6":
+            self.send_response(302); self.send_header("Location", "http://[::1]:" + port + "/inner"); self.end_headers()
+        elif self.path == "/inner":
+            self.send_response(200); self.end_headers(); self.wfile.write(b"INNER")
+        else:
+            self.send_response(404); self.end_headers()
+    def log_message(self, *a): pass
+http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+PY
+  python3 "$sb/redir.py" "$rport" >/dev/null 2>&1 &
+  rsrv=$!
+  up=0
+  for _ in $(seq 1 30); do
+    curl -fs --max-time 1 "http://127.0.0.1:$rport/inner" >/dev/null 2>&1 \
+      && { up=1; break; }
+    sleep 0.2
+  done
+  if [ "$up" = 1 ]; then
+    t1=$(mktemp); t2=$(mktemp); t3=$(mktemp); t4=$(mktemp)
+    bash "$guard" fetch-user "http://127.0.0.1:$rport/seed" "$t1" 65536 >/dev/null 2>&1
+    expect_eq "seed mode: user URL honored + same-host hop" "0" "$?"
+    expect_eq "seed mode: body arrived" "INNER" "$(cat "$t1" 2>/dev/null)"
+    bash "$guard" fetch "http://127.0.0.1:$rport/seed" "$t2" 65536 >/dev/null 2>&1
+    expect_eq "strict mode rejects loopback seed" "1" "$?"
+    bash "$guard" fetch-user "http://127.0.0.1:$rport/cross" "$t3" 65536 >/dev/null 2>&1
+    expect_eq "seed mode blocks cross-host private hop" "1" "$?"
+    bash "$guard" fetch-user "http://127.0.0.1:$rport/v6" "$t4" 65536 >/dev/null 2>&1
+    expect_eq "seed mode blocks [::1] hop" "1" "$?"
+    b3=$(cat "$t3" 2>/dev/null); b4=$(cat "$t4" 2>/dev/null)
+    expect_eq "blocked hops wrote no body" "0" "$(( ${#b3} + ${#b4} ))"
+    rm -f "$t1" "$t2" "$t3" "$t4"
+  else
+    echo "SKIP: seed-mode redirect cases (server did not start)"
+  fi
+  kill "$rsrv" 2>/dev/null || true
+  wait "$rsrv" 2>/dev/null || true
 else
   echo "SKIP: add-feed discovery cases (no python3)"
 fi
