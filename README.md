@@ -46,13 +46,15 @@ The launch timeline lives in the History group:
 ## Installation
 
 ```
-omarchy plugin add https://github.com/AkinleyeMicheal/omarchy-command-center.git --enable
+omarchy plugin add https://github.com/AkinleyeMicheal/omarchy-command-center.git --enable --yes
 ```
 
-Optional bar widget next to the Omarchy menu:
+Installing with `--enable` also places the bar widget (left click opens the
+palette, right click opens a terminal) in the bar's center section. To move
+it next to the Omarchy menu instead:
 
 ```
-omarchy bar put fonsgaudii.cmdcenter --after omarchy.menu
+omarchy bar move fonsgaudii.cmdcenter --after omarchy.menu
 ```
 
 ## Keybinding
