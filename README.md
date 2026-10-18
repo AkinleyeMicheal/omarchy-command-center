@@ -81,11 +81,29 @@ for t in tests/*.test.js; do node "$t"; done
 for t in tests/*.test.sh; do bash "$t"; done
 ```
 
-The suite is 780 assertions across ranking, models, providers, panels, power
-actions, news feeds, menu parity, and recents. The full build history and
+The suite is 885 assertions across ranking, models, providers, panels, power
+actions, news feeds, menu parity, recents, and the URL/destination
+security policy. The full build history and
 pitfalls log live in [ROADMAP.md](ROADMAP.md). Mutated state stays in
 `~/.local/state/omarchy-cmdcenter/`; the plugin never edits
 `/usr/share/omarchy/`.
+
+## Network access
+
+- **Weather** (Open-Meteo, your coordinates), **feeds you entered** in
+  News → Edit feeds or Add feed (web URLs only), and the optional
+  **ask-an-agent** row (the endpoint you configure) — all user-intent
+  destinations, honored as entered. Links a pasted page *declares*, and
+  every feed-supplied URL, are content and get the guard below; article
+  and search links open only as http(s).
+- **Feed-supplied image URLs** (article heroes and row favicons) pass a
+  destination guard (`fetch-guard.sh`): http(s)
+  only, no userinfo, every resolved address must be publicly routable
+  (loopback, RFC1918, link-local/metadata, CGNAT, ULA/link-local/
+  multicast IPv6, and mapped/NAT64 embeddings are blocked), redirects
+  are followed manually with the same check re-applied at each hop, and
+  the validated addresses are pinned into curl (`--resolve`) so a DNS
+  rebind between check and connect cannot win. No telemetry.
 
 ## License
 

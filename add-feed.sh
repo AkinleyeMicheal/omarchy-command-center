@@ -26,6 +26,17 @@ if [[ -z $url ]]; then
 fi
 # Tolerate a copy-pasted URL with stray trailing whitespace.
 url="${url%"${url##*[![:space:]]}"}"
+# A feed URL is a web URL: file://, dict:// and friends have no place
+# here (the probe would otherwise happily read a local file as a "feed").
+case "$url" in
+  http://* | https://*) ;;
+  *) echo "not an http(s) url" >&2; exit 4 ;;
+esac
+# URLs the USER pasted are their own intent (LAN/homelab feeds included);
+# links a pasted PAGE declares are content — those get the full
+# destination guard below, like every other feed-supplied URL.
+# shellcheck source=fetch-guard.sh
+. "$here/fetch-guard.sh"
 mkdir -p "$state"
 [[ -f $feeds_file ]] || printf '{"feeds":[]}' > "$feeds_file"
 
@@ -36,7 +47,9 @@ trap cleanup EXIT
 UA="omarchy-cmdcenter/1.0 (RSS reader)"
 probe=$(mktemp); tmps+=("$probe")
 
-curl -fsSL --max-time 15 -A "$UA" "$url" -o "$probe" 2>/dev/null \
+curl -fsSL --max-time 15 --max-filesize 8388608 \
+  --proto '=http,https' --proto-redir '=http,https' \
+  -A "$UA" "$url" -o "$probe" 2>/dev/null \
   || { echo "could not fetch $url" >&2; exit 4; }
 
 feed_url="$url"
@@ -47,7 +60,13 @@ if ! head -c 512 "$probe" | grep -qiE '<\?xml|<rss|<feed[ >]'; then
     | grep -oiE 'href="[^"]+"' | head -1 | cut -d'"' -f2 || true)
   [[ -n $href ]] || { echo "no feed declared by $url" >&2; exit 4; }
   case "$href" in
-    http://*|https://*) feed_url="$href" ;;
+    http://*|https://*)
+      feed_url="$href"
+      # Content-declared absolute URL → public destinations only
+      # (fetch-guard.sh: the same policy every item image obeys).
+      netguard_check_url "$feed_url" \
+        || { echo "declared feed host not allowed (${NETGUARD_REASON})" >&2; exit 4; }
+      ;;
     /*)
       feed_url="$(printf '%s' "$url" | sed -E 's#^([a-zA-Z][a-zA-Z0-9+.-]*://[^/]+).*#\1#')$href"
       ;;
@@ -55,7 +74,9 @@ if ! head -c 512 "$probe" | grep -qiE '<\?xml|<rss|<feed[ >]'; then
       feed_url="$(printf '%s' "$url" | sed -E 's#^(.*/)[^/]*$#\1/')$href"
       ;;
   esac
-  curl -fsSL --max-time 15 -A "$UA" "$feed_url" -o "$probe" 2>/dev/null \
+  curl -fsSL --max-time 15 --max-filesize 8388608 \
+    --proto '=http,https' --proto-redir '=http,https' \
+    -A "$UA" "$feed_url" -o "$probe" 2>/dev/null \
     || { echo "declared feed $feed_url not fetchable" >&2; exit 4; }
 fi
 

@@ -461,6 +461,21 @@ check("dedupe: empty id string falls back to the route",
   ["a"])
 check("dedupe: empty input", dedupeRecentEntries([]), [])
 
+// --------------------------------------------------------------- isWebUrl
+// Scheme gate before Qt.openUrlExternally (feed content and search URLs).
+check("weburl: https passes", isWebUrl("https://example.com/a?b=c"), true)
+check("weburl: http passes", isWebUrl("http://example.com"), true)
+check("weburl: uppercase scheme passes", isWebUrl("HTTPS://EXAMPLE.COM/x"), true)
+check("weburl: surrounding whitespace tolerated", isWebUrl("  https://a.b/c  "), true)
+check("weburl: file scheme blocked", isWebUrl("file:///etc/passwd"), false)
+check("weburl: javascript scheme blocked", isWebUrl("javascript:alert(1)"), false)
+check("weburl: ftp scheme blocked", isWebUrl("ftp://example.com/"), false)
+check("weburl: data scheme blocked", isWebUrl("data:text/html,hi"), false)
+check("weburl: protocol-relative blocked", isWebUrl("//evil.example/x"), false)
+check("weburl: embedded newline blocked", isWebUrl("https://a.b\njavascript:x"), false)
+check("weburl: inner space blocked", isWebUrl("https://a b"), false)
+check("weburl: empty/null blocked", isWebUrl(null) + "/" + isWebUrl(""), "false/false")
+
 // ------------------------------------------------------------------ summary
 console.log(`\n${passed} passed, ${failed} failed`)
 process.exit(failed ? 1 : 0)

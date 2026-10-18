@@ -15,6 +15,18 @@ case "$url" in
   *) echo "fetch-art: not an http(s) url" >&2; exit 4 ;;
 esac
 
+# Destination policy (same guard the feed-image fetcher uses): public
+# addresses only, redirects re-validated per hop. MPRIS art URLs are
+# app-supplied rather than feed-supplied, but they are remote content
+# too, so they get the same treatment.
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=fetch-guard.sh
+. "$here/fetch-guard.sh"
+if ! netguard_check_url "$url"; then
+  echo "fetch-art: destination not allowed ($NETGUARD_REASON)" >&2
+  exit 4
+fi
+
 if [ -f "$STATE/media/art.url" ] && [ -f "$STATE/media/art.img" ] \
    && [ "$(cat "$STATE/media/art.url" 2>/dev/null)" = "$url" ]; then
   exit 3
@@ -22,9 +34,8 @@ fi
 
 mkdir -p "$STATE/media"
 tmp="$(mktemp "$STATE/media/.art-XXXXXX")"
-if ! curl -fsSL --max-time 12 --max-filesize 4194304 \
-    -A "Mozilla/5.0 (X11; Linux x86_64) quickshell-art-fetch" \
-    -o "$tmp" "$url"; then
+if ! netguard_fetch "$url" "$tmp" 4194304 \
+    "Mozilla/5.0 (X11; Linux x86_64) quickshell-art-fetch"; then
   rm -f "$tmp"
   echo "fetch-art: download failed" >&2
   exit 1

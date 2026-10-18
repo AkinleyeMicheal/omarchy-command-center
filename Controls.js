@@ -206,6 +206,16 @@ var MEDIA_GLYPHS = {
 // most-recent-first, each carrying an identity id (the QML side resolves an
 // app and any same-named command to one key); the first — newest — entry
 // per identity wins and older twins drop.
+// Web-link gate for Qt.openUrlExternally: only scheme-correct,
+// whitespace-free http(s) URLs ever leave the palette (article links
+// are feed content; search URLs are built locally — both pass through
+// here so nothing else can slip out: file://, javascript:, embedded
+// newlines).
+function isWebUrl(u) {
+  var s = String(u == null ? "" : u).trim()
+  return /^https?:\/\/[^\s]+$/i.test(s)
+}
+
 function dedupeRecentEntries(entries) {
   var seen = ({})
   var out = []

@@ -22,6 +22,14 @@
 # already cached. Never touches news.json.
 set -euo pipefail
 
+# Destination policy for feed-CONTENT-supplied URLs (SSRF): every item
+# image is validated and fetched through fetch-guard.sh — public
+# destinations only, redirects re-checked per hop. See its header for
+# the trust boundary (user-entered feed URLs are honored as-is).
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=fetch-guard.sh
+. "$here/fetch-guard.sh"
+
 state="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-cmdcenter"
 feeds_file="$state/feeds.json"
 news_file="$state/news.json"
@@ -41,8 +49,7 @@ if [[ "${1:-}" == "--fetch-images" ]]; then
     dest="$state/news-img/$name.img"
     if [[ -f $dest ]]; then continue; fi
     ( tmp=$(mktemp "$state/news-img/.hero.XXXXXX")
-      if curl -fsSL --max-time 8 --max-filesize 4194304 \
-          -A "omarchy-cmdcenter/1.0 (RSS reader)" "$url" -o "$tmp" 2>/dev/null \
+      if netguard_fetch "$url" "$tmp" 4194304 \
          && [[ -s $tmp ]]; then mv "$tmp" "$dest"; else rm -f "$tmp"; fi
     ) &
     pids+=($!)
@@ -96,8 +103,7 @@ for ((i = 0; i < n; i++)); do
   dest="$state/news-img/feed-${fid}.img"
   if [[ -f $dest ]]; then continue; fi
   ( tmp=$(mktemp "$state/news-img/.logo.XXXXXX")
-    if curl -fsSL --max-time 6 --max-filesize 524288 \
-        -A "omarchy-cmdcenter/1.0 (RSS reader)" "https://$host/favicon.ico" -o "$tmp" 2>/dev/null \
+    if netguard_fetch "https://$host/favicon.ico" "$tmp" 524288 \
        && [[ -s $tmp ]]; then mv "$tmp" "$dest"; else rm -f "$tmp"; fi
   ) &
   logo_pids+=($!)
@@ -108,7 +114,8 @@ for ((i = 0; i < n; i++)); do
   url=$(jq -r ".feeds[$i].url" "$feeds_file")
   [[ -n $url && $url != null ]] || continue
   f=$(mktemp); tmps+=("$f")
-  if curl -fsSL --max-time 10 --retry 1 \
+  if curl -fsSL --max-time 10 --retry 1 --max-filesize 8388608 \
+      --proto '=http,https' --proto-redir '=http,https' \
       -A "omarchy-cmdcenter/1.0 (RSS reader)" "$url" -o "$f" 2>/dev/null; then
     got[$i]=$f
   else

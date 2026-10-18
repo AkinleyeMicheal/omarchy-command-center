@@ -406,6 +406,9 @@ Item {
     // Best-effort article heroes: positional name=url pairs for the
     // newest stories; the script skips files already cached, so this is
     // near-free on every load and only new/missing images cost a fetch.
+    // Destinations are guarded script-side (fetch-guard.sh): feed
+    // content can only cause requests to public addresses, with every
+    // redirect hop re-validated before it is followed.
     var args = ["bash", root.newsScript, "--fetch-images"]
     var cap = Math.min(root.newsItems.length, 15)
     for (var k = 0; k < cap; k++) {
@@ -2420,6 +2423,7 @@ Item {
     }
     if (p.kind === "web") {
       if (action === "copy") { root.copyText(p.url, "Search URL copied"); return }
+      if (!Controls.isWebUrl(p.url)) { root.osd("⚠", "Not a web link"); return }
       Qt.openUrlExternally(p.url)
       root.cancel()
       return
@@ -2469,6 +2473,7 @@ Item {
     }
     if (p.kind === "newsitem") {
       if (action === "copy") { root.copyText(p.url, "Link copied"); return }
+      if (!Controls.isWebUrl(p.url)) { root.osd("⚠", "Not a web link"); return }
       Qt.openUrlExternally(String(p.url))
       root.cancel()
       return

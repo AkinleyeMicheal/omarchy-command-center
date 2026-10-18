@@ -14,6 +14,11 @@ STATE="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-cmdcenter"
 
 arg="$(printf '%s' "${1:-}" | tr -d '\n\r\0' | cut -c1-64)"
 [ -n "$arg" ] || { echo "player-icon: empty identity" >&2; exit 4; }
+# The id joins path strings below — a slash would walk out of the
+# .desktop dirs (MPRIS identities and desktop ids never carry one).
+case "$arg" in
+  */*) echo "player-icon: bad identity" >&2; exit 4 ;;
+esac
 
 slug="$(printf '%s' "$arg" | tr 'A-Z' 'a-z' | tr -cs 'a-z0-9' '-' \
   | sed 's/^-//; s/-$//' | cut -c1-40)"
