@@ -434,6 +434,33 @@ check("history: non-object usage", historyEntries("x"), [])
   check("footer: chevron is U+25BE", cp(FOOTER_GLYPHS.chevron), 0x25BE)
 }
 
+// -------------------------------------------------- dedupeRecentEntries
+// User rule: the recents strip never shows one command or app twice; a
+// re-use promotes it to the front. Entries arrive sorted most-recent-first
+// with an identity id (QML resolves app/command name twins to one key).
+check("dedupe: app/command name twins keep the newest, drop the twin",
+  dedupeRecentEntries([
+    { route: "app:spotify", last: 3, id: "name:spotify" },
+    { route: "cmd/spotify", last: 2, id: "name:spotify" },
+    { route: "app:chromium", last: 1, id: "name:chromium" } ]),
+  ["app:spotify", "app:chromium"])
+check("dedupe: three-way twins collapse to the newest single entry",
+  dedupeRecentEntries([
+    { route: "cmd/x", id: "n" }, { route: "app:x", id: "n" },
+    { route: "app:x", id: "n" } ]),
+  ["cmd/x"])
+check("dedupe: all-unique entries pass through in order",
+  dedupeRecentEntries([
+    { route: "a", id: "x" }, { route: "b", id: "y" }, { route: "c", id: "z" } ]),
+  ["a", "b", "c"])
+check("dedupe: missing id falls back to the route as identity",
+  dedupeRecentEntries([{ route: "a" }, { route: "b" }, { route: "a" } ]),
+  ["a", "b"])
+check("dedupe: empty id string falls back to the route",
+  dedupeRecentEntries([{ route: "a", id: "" }, { route: "a", id: "" } ]),
+  ["a"])
+check("dedupe: empty input", dedupeRecentEntries([]), [])
+
 // ------------------------------------------------------------------ summary
 console.log(`\n${passed} passed, ${failed} failed`)
 process.exit(failed ? 1 : 0)

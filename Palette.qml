@@ -1869,12 +1869,37 @@ Item {
     for (var r in root.usage) {
       var u = root.usage[r]
       var last = u ? Number(u.last) || 0 : 0
-      if (u && Number(u.count) > 0 && last >= cutoff) entries.push({ route: r, last: last })
+      if (u && Number(u.count) > 0 && last >= cutoff)
+        entries.push({ route: r, last: last, id: root.recentIdentity(r) })
     }
     entries.sort(function(a, b) { return b.last - a.last })
-    var out = []
-    for (var i = 0; i < entries.length && out.length < 20; i++) out.push(entries[i].route)
-    return out
+    // One tile per thing (user rule): an app and any same-named command are
+    // one identity — the newest launch wins, the older twin drops, and the
+    // most→least recent order is preserved.
+    var out = Controls.dedupeRecentEntries(entries)
+    return out.length > 20 ? out.slice(0, 20) : out
+  }
+
+  // Identity for the recents dedupe: apps resolve by display name, commands
+  // by bare name, both normalized — so the "Spotify" app and a "spotify"
+  // command would share one key (verified collision-free in the catalog:
+  // a command whose bare name equals an app name launches that app).
+  // Unresolvable routes key by themselves.
+  function recentIdentity(route) {
+    var r = String(route || "")
+    if (r.indexOf("app:") === 0) {
+      var app = root.appById[r.slice(4)]
+      return app ? "name:" + root.recentNormName(app.name) : r
+    }
+    for (var j = 0; j < root.catalog.length; j++) {
+      if (root.catalog[j].route === r)
+        return "name:" + root.recentNormName(root.catalog[j].bare)
+    }
+    return r
+  }
+
+  function recentNormName(s) {
+    return String(s || "").toLowerCase().replace(/\s+/g, " ").trim()
   }
 
   // ---------------------------------------------------------- recent strip

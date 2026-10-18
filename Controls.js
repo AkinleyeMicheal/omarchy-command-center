@@ -201,6 +201,25 @@ var MEDIA_GLYPHS = {
   music: "󰝚"
 }
 
+// Recents dedupe (user rule): the strip may never show one command or app
+// twice, and a re-use promotes it to the front. Callers pass entries sorted
+// most-recent-first, each carrying an identity id (the QML side resolves an
+// app and any same-named command to one key); the first — newest — entry
+// per identity wins and older twins drop.
+function dedupeRecentEntries(entries) {
+  var seen = ({})
+  var out = []
+  for (var i = 0; i < entries.length; i++) {
+    var e = entries[i]
+    var k = e.id !== undefined && e.id !== null && String(e.id) !== ""
+      ? String(e.id) : String(e.route)
+    if (seen[k]) continue
+    seen[k] = true
+    out.push(e.route)
+  }
+  return out
+}
+
 // Kinds that act immediately on Enter (no Run/Terminal/Copy button hop).
 function isInstantKind(kind) {
   return kind === "calc" || kind === "convert" || kind === "web"
