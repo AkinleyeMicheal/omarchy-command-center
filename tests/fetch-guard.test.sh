@@ -224,7 +224,7 @@ expect_eq "no printf-to-wl-copy sink left" "0" \
   "$(grep -cE "printf '%s'.*wl-copy" Palette.qml)"
 expect_eq "wl-copy only as the stdin Process command" "1" \
   "$(grep 'wl-copy' Palette.qml | grep -v '//' | wc -l | tr -d ' ')"
-expect_eq "stdin Processes present" "5" \
+expect_eq "stdin Processes present" "6" \
   "$(grep -c 'stdinEnabled: true' Palette.qml)"
 expect_eq "copyCommandLine delegates to stdin copy" "1" \
   "$(grep -c 'root.copyText(cmdline, "Command copied")' Palette.qml)"
@@ -346,6 +346,98 @@ PY
   fi
   kill "$rsrv" 2>/dev/null || true
   wait "$rsrv" 2>/dev/null || true
+
+  # --- 8.14: token URLs + >128 KB bodies through the config-stdin path ----
+  tport=$((14000 + RANDOM % 5000))
+  cat > "$sb/tok.py" <<'PY'
+import http.server, sys
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path.startswith("/slow.xml") and "token=SCANSEC" in self.path:
+            import time; time.sleep(1.4)
+            body = b"SLOWOK"
+        elif self.path.startswith("/big.xml") and "token=TOKBIG" in self.path:
+            body = b'<?xml version="1.0"?><rss><channel><title>Big</title>' \
+                + b"x" * 150000 + b"</channel></rss>"
+        elif self.path.startswith("/feed.xml") and "token=SECRETTOK" in self.path:
+            body = b"FEEDOK"
+        else:
+            self.send_response(404)
+            self.send_header("Content-Length", "3"); self.end_headers()
+            self.wfile.write(b"BAD"); return
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body))); self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a): pass
+http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+PY
+  python3 "$sb/tok.py" "$tport" >/dev/null 2>&1 &
+  tsrv=$!
+  up=0
+  for _ in $(seq 1 30); do
+    curl -fs --max-time 1 "http://127.0.0.1:$tport/feed.xml?token=SECRETTOK" >/dev/null 2>&1 \
+      && { up=1; break; }
+    sleep 0.2
+  done
+  if [ "$up" = 1 ]; then
+    # (a) The tokenized URL fetches intact through the stdin config line,
+    # and while the slow request is in flight NO curl process's cmdline
+    # contains the token (only the test's own debug CLI may carry it —
+    # direct CLI use is the documented argv fallback, not the sink).
+    # The scan is fork-free bash (read -d '') so one pass over /proc is
+    # milliseconds — a fork-per-file scan outlasted the request itself.
+    t5=$(mktemp)
+    bash "$guard" fetch-user "http://127.0.0.1:$tport/slow.xml?token=SCANSEC" "$t5" 65536 >/dev/null 2>&1 &
+    fpid=$!
+    seen_curl=0; tok_hits=0
+    for _ in $(seq 1 30); do
+      for c in /proc/[0-9]*/cmdline; do
+        first=1; iscurl=0
+        while IFS= read -r -d '' arg; do
+          if [ "$first" = 1 ]; then
+            first=0
+            case "$arg" in *curl) iscurl=1 ;; esac
+          fi
+          if [ "$iscurl" = 1 ] && [ "${arg#*SCANSEC}" != "$arg" ]; then
+            tok_hits=1
+          fi
+        done 2>/dev/null < "$c"
+        [ "$iscurl" = 1 ] && seen_curl=1
+      done
+      kill -0 "$fpid" 2>/dev/null || break
+      sleep 0.06
+    done
+    wait "$fpid"
+    expect_eq "token fetch via config-stdin succeeds" "0" "$?"
+    expect_eq "token query arrived intact" "SLOWOK" "$(cat "$t5" 2>/dev/null)"
+    expect_eq "curl observed in /proc during fetch" "yes" \
+      "$([ "$seen_curl" -eq 1 ] && echo yes || echo no)"
+    expect_eq "token absent from every curl cmdline" "0" "$tok_hits"
+    rm -f "$t5"
+
+    # (b) A feed body beyond argv's ~128 KB per-argument limit: the old
+    # --argjson-xml assembly died with E2BIG here (set -e aborted the
+    # whole refresh); the file-backed path must succeed and keep every
+    # byte, the token URL included (in news.json — a state file).
+    mkdir -p "$sb/e2b/omarchy-cmdcenter"
+    printf '{"feeds":[{"id":"big","name":"Big Feed","url":"http://127.0.0.1:%s/big.xml?token=TOKBIG"}]}' \
+      "$tport" > "$sb/e2b/omarchy-cmdcenter/feeds.json"
+    rc=0; XDG_STATE_HOME="$sb/e2b" bash ./fetch-feeds.sh >/dev/null 2>&1 || rc=$?
+    newsf="$sb/e2b/omarchy-cmdcenter/news.json"
+    expect_eq "large feed refresh succeeds (was E2BIG)" "0" "$rc"
+    expect_eq "large xml intact in news.json" "true" \
+      "$(jq -r '.feeds[0].xml | length > 131072' "$newsf" 2>/dev/null)"
+    expect_eq "env-delivered fields intact in news.json" \
+      "big|Big Feed|http://127.0.0.1:$tport/big.xml?token=TOKBIG" \
+      "$(jq -r '[.feeds[0].id, .feeds[0].name, .feeds[0].url] | join("|")' \
+        "$newsf" 2>/dev/null)"
+    expect_eq "large feed: no fetch errors" "0" \
+      "$(jq -r '.errors' "$newsf" 2>/dev/null)"
+  else
+    echo "SKIP: token/config-stdin e2e (server did not start)"
+  fi
+  kill "$tsrv" 2>/dev/null || true
+  wait "$tsrv" 2>/dev/null || true
 else
   echo "SKIP: add-feed discovery cases (no python3)"
 fi
@@ -423,6 +515,42 @@ for s in fetch-feeds add-feed build-catalog update-usage toggle-pin fetch-art \
   expect_eq "state dir hardened in $s.sh" "1" \
     "$(grep -c 'chmod 700' "$s.sh")"
 done
+
+# --- 8.14: payload never rides script→child argv ---------------------------
+# curl gets its URL from a one-line config on stdin (feed/art fetches
+# carry tokens; the dict URL carries the query word).
+expect_eq "fetch-guard curl rides config stdin" "1" \
+  "$(grep -c -- '-K -' fetch-guard.sh)"
+expect_eq "fetch-guard no positional url arg on curl" "0" \
+  "$(grep -cF -- '-- "$cur"' fetch-guard.sh)"
+expect_eq "fetch-guard config line written to stdin" "1" \
+  "$(grep -cF 'url = "%s"' fetch-guard.sh)"
+expect_eq "dict curl rides config stdin" "1" \
+  "$(grep -c -- '-K -' dict-lookup.sh)"
+expect_eq "dict no positional url arg on curl" "0" \
+  "$(grep -cF -- '-- "$url"' dict-lookup.sh)"
+expect_eq "dict config line written to stdin" "1" \
+  "$(grep -cF 'url = "%s"' dict-lookup.sh)"
+# jq gets every private value via the environment (owner-only
+# /proc/<pid>/environ) — no value flags left in these payload scripts.
+for s in add-feed fetch-feeds media-memory; do
+  expect_eq "no jq value flags in $s.sh" "0" \
+    "$(grep -c -- '--arg' "$s.sh")"
+done
+# URL charset: raw quote/backslash cannot break out of the config line.
+expect_eq "url validation rejects quote/backslash" "1" \
+  "$(grep -c 'quote or backslash in url' fetch-guard.sh)"
+# Album art: MPRIS URL rides stdin from QML into the script.
+expect_eq "art proc carries no url argv" "0" \
+  "$(grep -c 'artScript, url' Palette.qml)"
+expect_eq "art script reads url from stdin" "1" \
+  "$(grep -c 'IFS= read -r url' fetch-art.sh)"
+# Weather tile: the location reaches curl via config stdin and jq via
+# the environment — never argv (8.14 sweep).
+expect_eq "weather curl rides config stdin" "1" \
+  "$(grep -c -- '-K -' Palette.qml)"
+expect_eq "no jq value flags in Palette.qml" "0" \
+  "$(grep -c -- '--arg' Palette.qml)"
 
 echo "$passed passed, $failed failed"
 [ "$failed" = 0 ]

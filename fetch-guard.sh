@@ -144,6 +144,14 @@ netguard_url_parts() {
   # URL — they are header- and parser-smuggling material.
   [[ ! $url =~ [^[:print:]] ]] \
     || { NETGUARD_REASON="control characters in url"; return 1; }
+  # Raw double quotes and backslashes are invalid in a URL (RFC 3986)
+  # and, since 8.14, the only characters that could break out of the
+  # quoted curl-config line the URL now rides on stdin and inject curl
+  # options (output=… and friends). Percent-encoded forms (%22, %5C)
+  # stay accepted. Both fetch modes funnel through this function, so
+  # seed, redirect hop and art URLs all get the check.
+  [[ ! $url =~ [\"\\] ]] \
+    || { NETGUARD_REASON="quote or backslash in url"; return 1; }
   [[ $url =~ ^[Hh][Tt][Tt][Pp][Ss]?:// ]] || { NETGUARD_REASON="not an http(s) url"; return 1; }
   NETGUARD_SCHEME=${BASH_REMATCH[0]%://}
   NETGUARD_SCHEME=${NETGUARD_SCHEME,,}
@@ -309,10 +317,17 @@ netguard_fetch_impl() {
     fi
     : > "$hdr"
     rc=0
-    code=$(curl --proto '=http,https' --proto-redir '=http,https' \
-      --max-time 8 --max-filesize "$maxbytes" \
-      -A "$ua" "${resolve[@]+"${resolve[@]}"}" \
-      -D "$hdr" -o "$out" -w '%{http_code}' -- "$cur" 2>/dev/null) || rc=$?
+    # The URL — feed tokens included — rides a one-line config on stdin,
+    # never argv: /proc/<pid>/cmdline is world-readable (8.14 review).
+    # netguard_url_parts guarantees $cur holds no quote/backslash, so
+    # the quoted config value cannot be broken out of; only non-sensitive
+    # dial data (--resolve host:port:ip of already-validated public
+    # addresses) stays in argv.
+    code=$(printf 'url = "%s"\n' "$cur" \
+      | curl --proto '=http,https' --proto-redir '=http,https' \
+        --max-time 8 --max-filesize "$maxbytes" \
+        -A "$ua" "${resolve[@]+"${resolve[@]}"}" \
+        -D "$hdr" -o "$out" -w '%{http_code}' -K - 2>/dev/null) || rc=$?
     if (( rc != 0 )); then rm -f "$hdr" "$out"; return 1; fi
     case "$code" in
       200)

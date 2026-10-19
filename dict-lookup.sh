@@ -26,9 +26,16 @@ esac
 [ "${#word}" -le 64 ] || { echo "dict-lookup: word too long" >&2; exit 4; }
 
 enc="${word// /%20}"
+# The URL carries the query word, so it rides a one-line config on
+# stdin — curl's argv is world-readable (/proc/<pid>/cmdline) and the
+# word is potentially pasted text (8.14 review; the word already rides
+# stdin into this script). The charset validation above (letters,
+# apostrophe, hyphen, %20) guarantees no quote/backslash can break out
+# of the quoted config value.
 url="https://api.dictionaryapi.dev/api/v2/entries/en/$enc"
 
-json="$(curl -sf --max-time 8 --max-filesize 2097152 --proto '=https' -- "$url")"
+json="$(printf 'url = "%s"\n' "$url" \
+  | curl -sf --max-time 8 --max-filesize 2097152 --proto '=https' -K -)"
 rc=$?
 if [ "$rc" -eq 22 ]; then exit 2 ; fi   # HTTP error → no entry
 [ "$rc" -eq 0 ] || exit 1               # DNS/timeout/…

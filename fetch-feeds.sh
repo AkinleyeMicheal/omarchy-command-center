@@ -6,8 +6,12 @@
 # (the palette's FileView watches it and rebuilds the list on change):
 #   { "fetchedAt": <ms>, "errors": <n>,
 #     "feeds": [ { "id", "name", "url", "xml": "<raw response>" } ] }
-# Raw XML travels embedded (jq -Rs) and is parsed QML-side by the pure
-# FeedParser.js — no XML tooling required on the box.
+# Raw XML travels embedded and is parsed QML-side by the pure
+# FeedParser.js — no XML tooling required on the box. Feed values reach
+# jq via the environment and fetched bodies via file-backed --rawfile /
+# --slurpfile (8.14): jq's argv is both world-readable (/proc cmdline)
+# and size-limited (~128 KB per argument), which previously exposed
+# feed URLs/tokens AND made feeds above that limit abort the refresh.
 #
 # SECURITY (8.11): the News group downloads NO feed-supplied images —
 # no item heroes, no favicons. Feed rows/cards render the feed's
@@ -80,23 +84,33 @@ for ((i = 0; i < n; i++)); do
 done
 
 entries="[]"
+# Empty stand-in body for feeds that failed to fetch (jq -Rs of an
+# empty file is the empty string — byte-identical to the old '""').
+empty=$(mktemp); tmps+=("$empty")
 for ((i = 0; i < n; i++)); do
   id=$(jq -r ".feeds[$i].id // \"feed$i\"" "$feeds_file")
   name=$(jq -r ".feeds[$i].name // .feeds[$i].url" "$feeds_file")
   url=$(jq -r ".feeds[$i].url // \"\"" "$feeds_file")
-  if [[ -n ${got[$i]:-} ]]; then xml=$(jq -Rs . < "${got[$i]}")
-  else xml='""'; fi
-  entries=$(jq -c --arg id "$id" --arg name "$name" --arg url "$url" \
-    --argjson xml "$xml" \
-    '. + [{id: $id, name: $name, url: $url, xml: $xml}]' <<<"$entries")
+  if [[ -n ${got[$i]:-} ]]; then body=${got[$i]}; else body=$empty; fi
+  # id/name/url (feed URLs can carry access tokens) ride the
+  # environment — owner-only environ, never world-readable argv — and
+  # the raw body rides a file-backed --rawfile: no size ceiling.
+  entries=$(FEED_ID="$id" FEED_NAME="$name" FEED_URL="$url" \
+    jq -c --rawfile xml "$body" \
+    '. + [{id: $ENV.FEED_ID, name: $ENV.FEED_NAME, url: $ENV.FEED_URL,
+           xml: $xml}]' <<<"$entries")
 done
 
 # Assemble on a per-run temp name (concurrent runs — startup timer +
 # group-entry nudge — must never interleave writes into one file), then
-# publish atomically.
+# publish atomically. The accumulated array holds every fetched body —
+# megabytes — so it passes as a temp file to --slurpfile, never argv.
 out=$(mktemp); tmps+=("$out")
-jq -n --argjson feeds "$entries" --argjson errors "$errors" \
-  --arg now "$(date +%s)000" \
-  '{fetchedAt: ($now | tonumber), errors: $errors, feeds: $feeds}' \
+efile=$(mktemp); tmps+=("$efile")
+printf '%s' "$entries" > "$efile"
+ERRORS="$errors" NOW_MS="$(date +%s)000" \
+  jq -n --slurpfile F "$efile" \
+  '{fetchedAt: ($ENV.NOW_MS | tonumber), errors: ($ENV.ERRORS | tonumber),
+    feeds: $F[0]}' \
   > "$out"
 mv "$out" "$news_file"

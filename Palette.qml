@@ -632,7 +632,10 @@ Item {
   // run in parallel (worst case ≈ slowest single curl, ~5s) so the
   // tile fills within a transient palette's lifetime; each writes to
   // its own slot in a trap-cleaned temp dir so line order is stable.
-  // Static command string, no user input.
+  // Static command string: $place resolves inside the child shell only.
+  // The location (user data) reaches curl as a stdin config line and
+  // jq via the environment — never argv (8.14); @uri guarantees the
+  // encoded path holds no quote/backslash for the config line.
   Process {
     id: weatherProc
     running: false
@@ -641,8 +644,9 @@ Item {
       "omarchy weather icon >\"$d/i\" 2>/dev/null & " +
       "omarchy weather status >\"$d/s\" 2>/dev/null & " +
       "{ place=$(omarchy weather location 2>/dev/null); " +
-      "[ -n \"$place\" ] && curl -fsS --max-time 4 " +
-      "\"https://wttr.in/$(jq -rn --arg p \"$place\" '$p | @uri')?format=j1\" " +
+      "[ -n \"$place\" ] && enc=$(p=\"$place\" jq -rn '$ENV.p | @uri') && " +
+      "printf '%s\\n' \"url = \\\"https://wttr.in/${enc}?format=j1\\\"\" | " +
+      "curl -fsS --max-time 4 -K - " +
       "2>/dev/null | jq -r '[(.current_condition[0].weatherDesc[0].value // \"\"), " +
       "(.nearest_area[0].country[0].value // \"\")] | @tsv'; } " +
       ">\"$d/d\" 2>/dev/null & wait; " +
@@ -700,6 +704,10 @@ Item {
   readonly property string mediaElapsed: Dashboard.fmtTime(root.mediaPosUs)
   readonly property string mediaTotal: Dashboard.fmtTime(root.mediaLenUs)
 
+  // Art fetch target: written to artProc's stdin in onStarted (the URL
+  // rides a pipe, never argv — signed CDN links exist).
+  property string artFetchUrl: ""
+
   function syncMediaArt() {
     var p = root.nowPlaying
     var url = p ? String(p.trackArtUrl || "") : ""
@@ -719,7 +727,9 @@ Item {
     if (url === root.mediaArtUrl) return
     if (artProc.running) { root.mediaPendingUrl = url; return }
     root.mediaArtUrl = url
-    artProc.command = [root.artScript, url]
+    root.artFetchUrl = url
+    artProc.stdinEnabled = true
+    artProc.command = [root.artScript]
     artProc.running = true
   }
 
@@ -740,7 +750,15 @@ Item {
   Process {
     id: artProc
     running: false
-    command: ["bash", root.artScript, ""]
+    // The art URL rides stdin, never argv (8.14: MPRIS art URLs are
+    // app-supplied and some CDNs sign them — world-readable cmdline
+    // must never carry it).
+    stdinEnabled: true
+    command: ["bash", root.artScript]
+    onStarted: {
+      write(String(root.artFetchUrl || "").replace(/[\r\n]+/g, ""))
+      stdinEnabled = false      // closeWriteChannel → the script's read EOFs
+    }
     stdout: StdioCollector { id: artOut; waitForEnd: true }
     stderr: StdioCollector { id: artErr; waitForEnd: true }
     onExited: function(exitCode) {

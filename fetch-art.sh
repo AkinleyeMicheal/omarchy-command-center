@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
-# fetch-art.sh <mpris:artUrl> — album-art download for the now-playing
+# fetch-art.sh [mpris:artUrl] — album-art download for the now-playing
 # tile (Phase 6b.1). The QML Image never fetches http(s) itself, so the
 # palette shells out here and displays state/media/art.img (atomic
 # rename; cached by source URL in media/art.url — same URL → no-op).
-# One argv URL, never interpolated: whatever comes in is data.
+# Delivery: stdin preferred (the palette writes the URL there so a
+# signed CDN link never sits in world-readable /proc cmdline — 8.14),
+# argv fallback for direct CLI/test use. Never interpolated: data only.
 # Exit: 0 downloaded · 3 already cached · 4 rejected arg · 1 failed.
 set -u
 
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-cmdcenter"
 
-url="$(printf '%s' "${1:-}" | tr -d '\n\r\0' | cut -c1-2048)"
+url="${1:-}"
+if [ -z "$url" ] && [ ! -t 0 ]; then IFS= read -r url || true; fi
+url="$(printf '%s' "$url" | tr -d '\n\r\0' | cut -c1-2048)"
 case "$url" in
   http://*|https://*) ;;
   *) echo "fetch-art: not an http(s) url" >&2; exit 4 ;;

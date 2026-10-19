@@ -121,6 +121,19 @@ pitfalls log live in [ROADMAP.md](ROADMAP.md). Mutated state stays in
   pattern. Process argv stays world-readable in `/proc`, so private
   payloads never appear there. OSD messages are static text for the
   same reason (control characters stripped, length-capped).
+- **Payload never rides child-process argv either.** The scripts hand
+  URLs (feed links may carry access tokens), remote-derived feed
+  names, the dictionary query, the weather location, and now-playing
+  metadata to their child tools without argv: curl reads its target
+  from a one-line config on stdin (`-K -`), jq reads every value from
+  the process environment (`/proc/<pid>/environ` is owner-only,
+  mode 0400 — unlike the world-readable cmdline), and fetched feed
+  bodies pass as files (`--rawfile`/`--slurpfile`, which also removes
+  argv's ~128KB per-argument size limit that could abort a refresh).
+  URLs are validated first: raw quotes and backslashes (invalid in
+  URLs and the only config-line breakout characters) are rejected.
+  Same-UID processes already share the trust of your state directory;
+  other local users see neither channel.
 - **Command execution is user intent only.** Terminal launches and
   background runs execute the command line you can see and edit in the
   palette — the equivalent of typing it in a terminal (its text is

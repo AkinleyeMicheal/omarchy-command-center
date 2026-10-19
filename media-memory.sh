@@ -13,9 +13,12 @@
 # previous copy (a track change before its art lands); LOGO "-" means none.
 # APP_ID is the catalog desktop id used to relaunch the player on click.
 #
-# Every runtime value is a single argv element — jq does all JSON
-# encoding, so quotes/newlines/control bytes in titles can never break
-# the file or the command line (no eval, no string-built JSON).
+# Every runtime value reaches jq through the process environment
+# (owner-only /proc/<pid>/environ, mode 0400) — never argv, which is
+# world-readable. jq still does all JSON encoding, so quotes/newlines/
+# control bytes in titles can never break the file or the command line
+# (no eval, no string-built JSON), and private listening history never
+# appears in anyone else's process listings.
 #
 # Exit codes: save 0 ok · 2 usage · 1 write failure. load 0 · 3 no snapshot.
 set -u
@@ -61,7 +64,8 @@ case "$cmd" in
     # A save without a title is a usage error in both modes (an EOF'd
     # stdin must not produce a phantom empty snapshot).
     [ -n "$title" ] || exit 2
-    # Only plain non-negative integers may reach --argjson.
+    # Only plain non-negative integers may reach jq's number parsing
+    # (sanitized before the environment handoff below).
     case $len_us in '' | *[!0-9]*) len_us=0 ;; esac
     case $pos_us in '' | *[!0-9]*) pos_us=0 ;; esac
 
@@ -89,18 +93,17 @@ case "$cmd" in
 
     tmp=$(mktemp "$state_dir/.last-media.XXXXXX") || exit 1
     trap 'rm -f "$tmp"' EXIT
-    jq -n \
-      --arg t "$title" \
-      --arg ar "$artist" \
-      --arg id "$app_id" \
-      --arg ide "$identity" \
-      --arg art "$art_file" \
-      --arg logo "$logo" \
-      --argjson len "$len_us" \
-      --argjson pos "$pos_us" \
-      '{title: $t, artist: $ar, appId: $id, identity: $ide,
-        artFile: $art, logoFile: $logo, lenUs: $len, posUs: $pos,
-        at: (now * 1000)}' >"$tmp" || exit 1
+    # Env delivery (owner-only environ), never jq's argv flags: title,
+    # artist and identity are private listening data that must never
+    # sit in world-readable argv. The numeric fields were sanitized to
+    # plain digits above, so tonumber cannot fail on them.
+    TITLE="$title" ARTIST="$artist" APP_ID="$app_id" IDENTITY="$identity" \
+    ART_FILE="$art_file" LOGO_FILE="$logo" LEN_US="$len_us" POS_US="$pos_us" \
+    jq -n '{title: $ENV.TITLE, artist: $ENV.ARTIST, appId: $ENV.APP_ID,
+        identity: $ENV.IDENTITY, artFile: $ENV.ART_FILE,
+        logoFile: $ENV.LOGO_FILE, lenUs: ($ENV.LEN_US | tonumber),
+        posUs: ($ENV.POS_US | tonumber), at: (now * 1000)}' >"$tmp" \
+      || exit 1
     mv -f "$tmp" "$json" || exit 1
     trap - EXIT
     ;;

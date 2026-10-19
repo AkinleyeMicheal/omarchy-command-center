@@ -10,7 +10,9 @@
 # feeds.json (deduped by URL, id suffixed on host collision) before the
 # normal fetch runs — the palette picks news.json up via its file watch.
 #
-# argv-only: the URL travels as an argument, never in a shell string.
+# Delivery: stdin preferred (the palette writes the URL there), argv for
+# direct CLI/test use; jq receives every value via the environment —
+# never argv, which is world-readable in /proc/<pid>/cmdline.
 # Prints the added feed's name on stdout.
 # Exit: 0 ok · 2 bad usage · 3 already added · 4 fetch/discovery failed.
 set -euo pipefail
@@ -124,23 +126,27 @@ fi
 
 # Identity: slug of the feed's host; same URL → already added (3);
 # same id from a different URL → id2, id3, …
+# jq gets every value through the environment (owner-only
+# /proc/<pid>/environ), never as jq argv flags: the URL can carry an
+# access token and the name comes from remote content — neither may sit
+# in world-readable argv (8.14 review).
 id=$(printf '%s' "$feed_url" | sed -E 's#^https?://([^/]+).*#\1#' \
   | sed -E 's/^www\.//; s/[^A-Za-z0-9]+/-/g; s/^-+//; s/-+$//')
 [[ -n $id ]] || id="feed"
-if jq -e --arg url "$feed_url" '.feeds | any(.url == $url)' \
+if FEED_URL="$feed_url" jq -e '.feeds | any(.url == $ENV.FEED_URL)' \
     "$feeds_file" >/dev/null 2>&1; then
   echo "already added: $name" >&2
   exit 3
 fi
 base="$id"; n=2
-while jq -e --arg id "$id" '.feeds | any(.id == $id)' \
+while FEED_ID="$id" jq -e '.feeds | any(.id == $ENV.FEED_ID)' \
     "$feeds_file" >/dev/null 2>&1; do
   id="$base$((n))"; n=$((n + 1))
 done
 
 out=$(mktemp "$state/.feeds.XXXXXX"); tmps+=("$out")
-jq --arg id "$id" --arg name "$name" --arg url "$feed_url" \
-  '.feeds += [{id: $id, name: $name, url: $url}]' \
+FEED_ID="$id" FEED_NAME="$name" FEED_URL="$feed_url" \
+  jq '.feeds += [{id: $ENV.FEED_ID, name: $ENV.FEED_NAME, url: $ENV.FEED_URL}]' \
   "$feeds_file" > "$out"
 mv "$out" "$feeds_file"
 

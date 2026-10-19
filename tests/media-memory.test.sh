@@ -109,6 +109,17 @@ expect_eq "logo passthrough" \
 bash "$mem" save "T" "A" "" "" "-" "-" 0 0 >/dev/null 2>&1
 expect_eq "logo - → empty" "$(bash "$mem" load | jq -r '.logoFile')" ""
 
+# --- 8.14: env delivery keeps hostile strings intact on the palette path --
+# Same JSON killers as above, but through the NUL-stdin hop the palette
+# actually uses — proves the env-based jq write lost nothing.
+printf 'Line1\nLine2 "quo" & <tag>\x00Björk\x00mpv\x00mpv\x00-\x00-\x000\x000\x00' \
+  | bash "$mem" save >/dev/null 2>&1
+expect_eq "stdin hostile save exit" 0 "$?"
+expect_eq "stdin hostile title intact" \
+  "$(bash "$mem" load | jq -r '.title')" $'Line1\nLine2 "quo" & <tag>'
+expect_eq "stdin hostile artist intact" \
+  "$(bash "$mem" load | jq -r '.artist')" "Björk"
+
 # --- hygiene ---------------------------------------------------------------
 expect_eq "no tmp leftovers" \
   "$(find "$XDG_STATE_HOME/omarchy-cmdcenter" -name '.last-media.*' | wc -l)" "0"
